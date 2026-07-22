@@ -206,6 +206,71 @@ docker compose restart miloagent
 
 ---
 
+## Annexe — Déploiement sur Oracle Cloud "Always Free" (0 €/mois)
+
+Oracle Cloud offre une VM Linux **gratuite à vie** (Ampere ARM, jusqu'à 4 OCPU /
+24 Go RAM) — largement suffisante et vraiment gratuite. Voici les différences
+par rapport au guide ci-dessus.
+
+### A1. Créer la VM
+
+1. Compte sur https://cloud.oracle.com (carte bancaire demandée pour
+   vérification, **non débitée** sur le tier Always Free).
+2. **Compute → Instances → Create Instance**.
+3. **Image** : Ubuntu 22.04. **Shape** : `VM.Standard.A1.Flex` (Ampere/ARM),
+   règle par ex. **2 OCPU / 12 Go RAM** (dans les limites gratuites).
+4. Ajoute ta **clé SSH publique**, puis crée l'instance.
+5. Note l'**IP publique** et fais pointer ton DNS (`track.novaspeak.app` → A → IP).
+
+### A2. ⚠️ Le piège n°1 : ouvrir les ports (DOUBLE pare-feu)
+
+Oracle bloque tout par défaut à **deux endroits**. Il faut ouvrir 80 et 443 aux
+deux :
+
+**a) Dans la console Oracle** (Virtual Cloud Network) :
+`Networking → VCN → Security Lists → Default → Add Ingress Rules`
+- Source `0.0.0.0/0`, TCP, port **80**
+- Source `0.0.0.0/0`, TCP, port **443**
+
+**b) Sur la VM elle-même** (les images Ubuntu Oracle ont un iptables restrictif) :
+```bash
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save     # rend les règles permanentes
+```
+> Si tu sautes l'étape (b), le SSL (certbot) et le dashboard sembleront
+> "injoignables" alors que tout tourne — c'est l'erreur la plus courante.
+
+### A3. Installer et déployer (identique au guide, ARM-compatible)
+
+```bash
+ssh ubuntu@TON_IP
+curl -fsSL https://get.docker.com | sh
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/Mailpro31/Readyt.ia-saas.git nova-agent
+cd nova-agent
+```
+Puis suis les **étapes 2 à 8** du guide principal. Le `Dockerfile` compile
+depuis les sources, donc il fonctionne nativement en **ARM64** — rien à changer.
+
+> Note ARM : si un jour l'auth Reddit par navigateur (Playwright/Chromium) pose
+> problème, privilégie `auth_mode: web` avec cookies (déjà le défaut) plutôt
+> que le mode navigateur lourd.
+
+### A4. Récap Oracle
+
+| Poste | Coût |
+|-------|------|
+| VM Ampere ARM (2 OCPU / 12 Go) | **0 € à vie** |
+| Pipeline organique | **0 €** |
+| GEO tracking (optionnel) | ~1-4 $/mois |
+
+Seul rappel : l'IP d'un datacenter peut être surveillée par Reddit → le warm-up
+(module 1.0) atténue le risque, un proxy résidentiel (payant) peut devenir utile
+si tu montes en volume.
+
+---
+
 ## Points de sécurité
 
 - Ne commit **jamais** `config/*.local.yaml`, `.env`, `config/geo.yaml`
