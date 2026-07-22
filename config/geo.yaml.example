@@ -1,0 +1,52 @@
+# =============================================================================
+# GEO / AEO — AI Citation Tracking  (core/geo_tracker.py)
+# =============================================================================
+# Tracks whether the promoted product is mentioned when users ask an AI
+# assistant a relevant question (e.g. "best voice typing app for Windows").
+#
+# ⚠️  UNLIKE the rest of MiloAgent this feature needs PAID API calls. See the
+#     README "GEO tracking cost" section for the monthly estimate.
+#
+# Copy this file to config/geo.yaml and fill in the API keys (or leave a key
+# empty / set enabled:false to skip that provider). Keys can also come from the
+# environment variables listed below, which take precedence over the file.
+# =============================================================================
+
+geo:
+  enabled: true
+  interval_hours: 48          # how often orchestrator runs the GEO job
+
+  providers:
+    - name: "openai"
+      enabled: true
+      model: "gpt-4o-mini"
+      api_key_env: "OPENAI_API_KEY"     # falls back to this env var
+      api_key: ""                        # or hard-code here (gitignored geo.yaml)
+    - name: "anthropic"
+      enabled: true
+      model: "claude-haiku-4-5-20251001"
+      api_key_env: "ANTHROPIC_API_KEY"
+      api_key: ""
+    - name: "perplexity"
+      enabled: true
+      model: "sonar"
+      api_key_env: "PERPLEXITY_API_KEY"
+      api_key: ""
+    - name: "google"
+      enabled: false
+      model: "gemini-2.0-flash"
+      api_key_env: "GEMINI_API_KEY"
+      api_key: ""
+
+  # Probe queries per project. Keys must match project filename (without .yaml).
+  # The tracker also reads brand mention terms from each project's geo config
+  # (see projects/nova.yaml -> geo.brand_terms). If a project isn't listed here
+  # it is skipped.
+  projects:
+    nova:
+      - "meilleur logiciel de dictée vocale windows 2026"
+      - "best speech to text app for windows"
+      - "alternative à dragon naturallyspeaking"
+      - "voice typing app that reformats text automatically"
+      - "offline dictation software privacy windows"
+      - "dictée vocale locale hors ligne windows"

@@ -1,0 +1,52 @@
+# =============================================================================
+# Active Account Warm-Up Plan  (safety/warmup_scheduler.py)
+# =============================================================================
+# New Reddit accounts cannot safely post product-related content: doing so from
+# a cold account gets it shadow-banned before any measurement is possible.
+# This plan schedules *neutral* actions (generic upvotes / generic comments on
+# threads UNRELATED to any promoted product) on a progressive multi-day ramp.
+#
+# An account is only considered "actionable" for a project (e.g. Nova) once it
+# reaches BOTH the minimum karma AND the minimum number of warm-up days below.
+# Until then account_manager filters it out of the project account pool.
+# =============================================================================
+
+warmup:
+  enabled: true
+
+  # Ramp: number of neutral actions to perform per warm-up day. The list index
+  # is the day number (day 0 = 2 actions, day 1 = 2, ... day 9 = 8). Days beyond
+  # the list length reuse the last value.
+  actions_per_day: [2, 2, 3, 3, 4, 4, 5, 6, 7, 8]
+
+  # An account graduates to "ready" only when BOTH conditions hold:
+  target_day_count: 10        # minimum warm-up days before graduation
+  min_karma: 25               # minimum total karma before graduation
+
+  # Ratio of upvotes vs. comments among the neutral actions (0.7 = 70% upvotes).
+  upvote_ratio: 0.7
+
+  # Max neutral warm-up actions per orchestrator cycle across all warming
+  # accounts (keeps within safety/ rate limits).
+  max_actions_per_cycle: 4
+
+  # Generic, product-unrelated subreddits used only for warm-up activity.
+  neutral_subreddits:
+    - "AskReddit"
+    - "todayilearned"
+    - "mildlyinteresting"
+    - "explainlikeimfive"
+    - "NoStupidQuestions"
+    - "CasualConversation"
+    - "showerthoughts"
+    - "LifeProTips"
+
+  # Generic, safe comment templates for warm-up. No links, no product mentions.
+  # Kept deliberately bland; content quality is not the goal here, karma is.
+  neutral_comments:
+    - "This is really interesting, thanks for sharing."
+    - "TIL, appreciate the explanation."
+    - "Good point, hadn't thought about it that way."
+    - "Same experience here, you're not alone."
+    - "Thanks, this actually helped me understand it better."
+    - "Great write-up, saving this for later."

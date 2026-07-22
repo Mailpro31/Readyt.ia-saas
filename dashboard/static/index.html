@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiloAgent — AI Growth Agent Mission Control</title>
+<meta name="description" content="MiloAgent is an autonomous AI growth agent for Reddit, Twitter/X and Telegram.">
+<meta name="robots" content="index, follow">
+<link rel="icon" type="image/png" href="/static/miloagent.png">
+<link rel="apple-touch-icon" href="/static/miloagent.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="/static/cyber.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- Particle Background -->
+<canvas id="particleCanvas"></canvas>
+
+<!-- ═══════════════════ LOGIN ═══════════════════ -->
+<div id="loginPage" class="login-page">
+  <div class="login-box">
+    <img src="/static/miloagent.png" alt="MiloAgent" style="width:80px;height:80px;margin-bottom:16px;border-radius:50%;border:2px solid var(--border);box-shadow:0 0 40px rgba(249,168,212,.08)">
+    <div class="logo">MILOAGENT</div>
+    <div class="logo-sub">Mission Control</div>
+    <div class="field">
+      <input id="loginUser" type="text" placeholder="Username" autocomplete="username">
+    </div>
+    <div class="field">
+      <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password">
+      <button class="toggle-vis" onclick="toggleVis()" type="button">show</button>
+    </div>
+    <div id="loginError" class="error-msg"></div>
+    <button id="btnLogin" class="btn-login" onclick="doLogin()">Launch Control</button>
+  </div>
+</div>
+
+<!-- ═══════════════════ DASHBOARD ═══════════════════ -->
+<div id="dashboardPage" class="dashboard">
+
+  <!-- Mission Control Header -->
+  <div class="mc-header">
+    <div class="mc-left">
+      <button class="hamburger" onclick="toggleMobileMenu()" aria-label="Menu">
+        <span></span><span></span><span></span>
+      </button>
+      <img src="/static/miloagent.png" alt="" style="width:28px;height:28px;border-radius:50%">
+      <span class="mc-logo">MILOAGENT</span>
+      <span class="mc-badge" id="mcVersion">v6.0</span>
+      <span class="mc-badge" id="mcMode">server</span>
+    </div>
+    <div class="mc-right">
+      <div class="mc-status">
+        <span class="status-orb stopped" id="statusOrb"></span>
+        <span id="statusText">Connecting...</span>
+      </div>
+      <span class="mc-uptime" id="uptime"></span>
+      <button class="btn btn-sm" onclick="logout()">Logout</button>
+    </div>
+  </div>
+
+  <!-- Live Metrics Ribbon -->
+  <div class="metrics-ribbon" id="metricsRibbon">
+    <div class="metric-pill"><span class="mv" id="mrActions" style="color:var(--accent)">0</span><span class="ml">Actions/24h</span></div>
+    <div class="metric-pill"><span class="mv" id="mrReddit" style="color:var(--orange)">0</span><span class="ml">Reddit</span></div>
+    <div class="metric-pill"><span class="mv" id="mrTelegram" style="color:var(--cyan)">0</span><span class="ml">Telegram</span></div>
+    <div class="metric-pill"><span class="mv" id="mrOpps" style="color:var(--yellow)">0</span><span class="ml">Opportunities</span></div>
+    <div class="metric-pill"><span class="mv" id="mrAccounts" style="color:var(--blue)">0</span><span class="ml">Accounts</span></div>
+    <div class="metric-pill"><span class="mv" id="mrHubs" style="color:var(--pink)">0</span><span class="ml">Communities</span></div>
+    <div class="metric-pill"><span class="mv" id="mrCPU" style="color:var(--text)">-</span><span class="ml">CPU</span></div>
+    <div class="metric-pill"><span class="mv" id="mrRAM" style="color:var(--text)">-</span><span class="ml">RAM</span></div>
+  </div>
+
+  <!-- Navigation Tabs — 5 tabs -->
+  <div class="nav-tabs">
+    <div class="nav-tab active" data-tab="command" onclick="switchTab('command')"><span class="tab-icon">&#9678;</span>Mission Control</div>
+    <div class="nav-tab" data-tab="liveops" onclick="switchTab('liveops')"><span class="tab-icon">&#9632;</span>Live Ops<span class="tab-badge err-badge" id="tabErrBadge"></span></div>
+    <div class="nav-tab" data-tab="intel" onclick="switchTab('intel')"><span class="tab-icon">&#9733;</span>Intelligence<span class="tab-badge score-badge" id="tabScoreBadge"></span></div>
+    <div class="nav-tab" data-tab="communities" onclick="switchTab('communities')"><span class="tab-icon">&#9673;</span>Communities</div>
+    <div class="nav-tab" data-tab="config" onclick="switchTab('config')"><span class="tab-icon">&#9881;</span>Config<span class="tab-badge cpu-badge" id="tabCpuBadge"></span></div>
+  </div>
+
+  <!-- Global Status Bar -->
+  <div class="global-status-bar" id="globalStatusBar">
+    <span class="gsb-live" id="gsbLive">&#9679; LIVE</span>
+    <span class="gsb-item"><span class="gsb-val" id="gsbActions">0</span> actions today</span>
+    <span class="gsb-sep">|</span>
+    <span class="gsb-item">Last scan: <span class="gsb-val" id="gsbLastScan">-</span></span>
+    <span class="gsb-sep">|</span>
+    <span class="gsb-item">Next action: <span class="gsb-val" id="gsbNextAction">-</span></span>
+    <span class="gsb-sep">|</span>
+    <span class="gsb-item gsb-err" id="gsbErrWrap">ERR: <span class="gsb-val" id="gsbErrors">0</span></span>
+    <span class="gsb-sep">|</span>
+    <span class="gsb-item">CPU <span class="gsb-val" id="gsbCPU">-</span></span>
+    <span class="gsb-sep">|</span>
+    <span class="gsb-item">RAM <span class="gsb-val" id="gsbRAM">-</span></span>
+    <span class="gsb-spinner" id="gsbSpinner" style="display:none"></span>
+  </div>
+
+  <!-- Emergency Banner -->
+  <div id="emergencyBanner" class="emergency-banner">
+    <span>EMERGENCY STOP ACTIVE -- All operations frozen</span>
+    <button class="btn btn-sm success" onclick="emergencyReset()">Reset</button>
+  </div>
+
+  <!-- ═══════ TAB 1: MISSION CONTROL ═══════ -->
+  <div id="tab-command" class="tab-content active">
+    <div class="stat-grid" id="statsRow"></div>
+    <div class="grid">
+      <!-- Actions Chart -->
+      <div class="card glow-cyan">
+        <h2><span class="card-icon">&#9679;</span> Actions by Type (24h)</h2>
+        <div class="chart-wrap"><canvas id="chartActions"></canvas></div>
+      </div>
+      <!-- Timeline Chart -->
+      <div class="card glow-purple">
+        <h2><span class="card-icon">&#9679;</span> Activity Timeline (7d)</h2>
+        <div class="chart-wrap"><canvas id="chartTimeline"></canvas></div>
+      </div>
+      <!-- Opportunity Funnel -->
+      <div class="card glow-orange">
+        <h2><span class="card-icon">&#9660;</span> Opportunity Funnel</h2>
+        <div id="funnelContainer"></div>
+      </div>
+      <!-- Reddit Minimap -->
+      <div class="card glow-green">
+        <h2>Reddit Map <span class="badge-count" id="redditCount">0</span></h2>
+        <div id="redditMap" style="max-height:280px;overflow-y:auto"></div>
+      </div>
+      <!-- Agent Controls + Schedule side by side -->
+      <div class="card">
+        <h2>Agent Controls</h2>
+        <div class="controls-grid">
+          <button class="btn primary" onclick="doControl('scan')">Scan Now</button>
+          <button class="btn primary" onclick="doControl('act')">Act Now</button>
+          <button class="btn primary" onclick="doControl('learn')">Learn</button>
+          <button class="btn primary" onclick="doControl('engage')">Engage</button>
+        </div>
+        <div class="controls-grid" style="margin-top:8px">
+          <button class="btn" onclick="doControl('auto-improve')">Auto-Improve</button>
+          <button class="btn" onclick="doControl('reload-config')">Reload Config</button>
+          <button class="btn success" id="btnResume" onclick="doControl('resume')" disabled>Resume</button>
+          <button class="btn danger" id="btnPause" onclick="doControl('pause')">Pause</button>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn btn-sm" onclick="doControl('cleanup')" style="flex:1">Cleanup DB</button>
+          <button id="btnEmergency" class="btn btn-sm danger" onclick="emergencyStop()" style="flex:1;font-weight:800;letter-spacing:.5px">EMERGENCY STOP</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Scheduled Jobs</h2>
+        <div id="scheduleList" style="max-height:280px;overflow-y:auto"></div>
+      </div>
+      <!-- Telegram Summary -->
+      <div class="card glow-cyan">
+        <h2>Telegram Activity <span class="badge-count" id="telegramCount">0</span></h2>
+        <div id="telegramPanel" style="max-height:280px;overflow-y:auto"></div>
+      </div>
+      <!-- Heatmap -->
+      <div class="card glow-cyan">
+        <h2><span class="card-icon">&#9632;</span> Activity Heatmap (28d)</h2>
+        <div id="heatmapContainer"></div>
+      </div>
+      <!-- Per-Account Reddit Performance -->
+      <div class="card full glow-purple">
+        <h2>Reddit Account Performance <span class="badge-count" id="redditAcctCount">0</span></h2>
+        <div id="redditAcctPerf"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ TAB 2: LIVE OPS (merged Activity + Server logs) ═══════ -->
+  <div id="tab-liveops" class="tab-content">
+    <div class="grid">
+      <div class="card full glow-cyan">
+        <h2>Live Agent Feed <span class="badge-count err-glow" id="feedErrCount" style="display:none">0</span></h2>
+        <div class="feed-filters" id="feedFilters">
+          <button class="btn btn-xs active" onclick="filterFeed('all')">All</button>
+          <button class="btn btn-xs feed-pill-scan" onclick="filterFeed('SCAN')">Scan</button>
+          <button class="btn btn-xs feed-pill-act" onclick="filterFeed('ACT')">Act</button>
+          <button class="btn btn-xs feed-pill-eng" onclick="filterFeed('ENG')">Engage</button>
+          <button class="btn btn-xs feed-pill-err" onclick="filterFeed('ERR')">Errors</button>
+          <button class="btn btn-xs feed-pill-hub" onclick="filterFeed('HUB')">Hub</button>
+          <button class="btn btn-xs feed-pill-learn" onclick="filterFeed('LEARN')">Learn</button>
+          <button class="btn btn-xs feed-pill-pres" onclick="filterFeed('PRES')">Presence</button>
+          <label class="feed-noise-toggle"><input type="checkbox" id="feedNoiseToggle" onchange="toggleNoise()"> Show health checks</label>
+          <span class="feed-auto-scroll" id="feedAutoScroll" onclick="toggleAutoScroll()">Auto-scroll: ON</span>
+        </div>
+        <div id="chatFeed" class="chat-feed"></div>
+      </div>
+      <div class="card">
+        <h2>Recent Actions</h2>
+        <div id="actionsFeed" class="feed"></div>
+      </div>
+      <div class="card">
+        <h2>Conversations & DMs</h2>
+        <div id="dmList" style="max-height:300px;overflow-y:auto"></div>
+        <div class="section-label" style="margin-top:14px">Telegram Alerts</div>
+        <div id="alertList" style="max-height:200px;overflow-y:auto"></div>
+      </div>
+      <div class="card full">
+        <h2>Server Logs <span class="badge-count" id="logCount">0</span></h2>
+        <div id="logsPanel" class="feed" style="max-height:300px;font-family:var(--font-data);font-size:11px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ TAB 3: INTELLIGENCE (merged Intel + Radar + Network) ═══════ -->
+  <div id="tab-intel" class="tab-content">
+    <!-- Intel sub-tabs -->
+    <div class="intel-tabs">
+      <div class="intel-tab active" data-sub="overview" onclick="switchIntelSub('overview')">Overview</div>
+      <div class="intel-tab" data-sub="trends" onclick="switchIntelSub('trends')">Trends & Knowledge</div>
+      <div class="intel-tab" data-sub="analysis" onclick="switchIntelSub('analysis')">Analysis</div>
+      <div class="intel-tab" data-sub="radar" onclick="switchIntelSub('radar')">Topic Radar</div>
+      <div class="intel-tab" data-sub="network" onclick="switchIntelSub('network')">Network Graph</div>
+    </div>
+
+    <!-- Sub: Overview -->
+    <div id="isub-overview" class="intel-sub-content active">
+      <div class="grid">
+        <div class="card glow-green">
+          <h2>Performance Score</h2>
+          <div id="perfPanel"></div>
+        </div>
+        <div class="card glow-purple">
+          <h2>Agent Brain</h2>
+          <div id="brainPanel"></div>
+        </div>
+        <div class="card glow-purple">
+          <h2>Intelligence Insights</h2>
+          <div id="insightsPanel"></div>
+        </div>
+        <div class="card glow-orange">
+          <h2>Top Opportunities</h2>
+          <div id="oppsList" class="feed" style="max-height:320px"></div>
+        </div>
+        <div class="card full glow-cyan">
+          <h2><span class="card-icon">&#9733;</span> AI Decision Log <span class="badge-count" id="decisionCount">0</span></h2>
+          <div id="decisionLog" class="feed" style="max-height:280px;overflow-y:auto"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub: Trends & Knowledge -->
+    <div id="isub-trends" class="intel-sub-content">
+      <div class="grid">
+        <div class="card glow-cyan">
+          <h2><span class="card-icon">&#9632;</span> Trending Feed <span class="badge-count" id="trendingCount">0</span></h2>
+          <div id="trendingFeed" class="feed" style="max-height:400px;overflow-y:auto"></div>
+        </div>
+        <div class="card glow-blue">
+          <h2><span class="card-icon">&#9679;</span> Knowledge Base <span class="badge-count" id="knowledgeCount">0</span></h2>
+          <div class="intel-filters" style="margin-bottom:8px;display:flex;gap:4px;flex-wrap:wrap">
+            <button class="btn btn-xs active" onclick="filterKnowledge('all')">All</button>
+            <button class="btn btn-xs" onclick="filterKnowledge('trend')">Trends</button>
+            <button class="btn btn-xs" onclick="filterKnowledge('news')">News</button>
+            <button class="btn btn-xs" onclick="filterKnowledge('talking_point')">Talking Pts</button>
+            <button class="btn btn-xs" onclick="filterKnowledge('strategy_rule')">Strategy</button>
+          </div>
+          <div id="knowledgeBase" class="feed" style="max-height:350px;overflow-y:auto"></div>
+        </div>
+        <div class="card glow-orange">
+          <h2><span class="card-icon">&#9733;</span> AI Discoveries <span class="badge-count" id="discoveriesCount">0</span></h2>
+          <div id="discoveriesList" class="feed" style="max-height:350px;overflow-y:auto"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub: Analysis -->
+    <div id="isub-analysis" class="intel-sub-content">
+      <div class="grid">
+        <div class="card glow-red">
+          <h2><span class="card-icon">&#9888;</span> Failure Patterns <span class="badge-count" id="failuresCount">0</span></h2>
+          <div id="failuresList" class="feed" style="max-height:400px;overflow-y:auto"></div>
+        </div>
+        <div class="card glow-green">
+          <h2><span class="card-icon">&#9679;</span> Sentiment Map</h2>
+          <div id="sentimentMap" style="max-height:400px;overflow-y:auto"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub: Topic Radar -->
+    <div id="isub-radar" class="intel-sub-content">
+      <div class="radar-controls" style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-sm active" onclick="filterRadar('all')">All</button>
+        <button class="btn btn-sm" onclick="filterRadar('subreddit')">Subreddits</button>
+        <button class="btn btn-sm" onclick="filterRadar('theme')">Trending</button>
+        <button class="btn btn-sm" onclick="filterRadar('keyword')">Keywords</button>
+        <button class="btn btn-sm" onclick="filterRadar('news')">News</button>
+        <button class="btn btn-sm" onclick="filterRadar('discovery')">Discoveries</button>
+        <span style="margin-left:auto;font-family:var(--font-data);font-size:11px;color:var(--text3)">Nodes: <span id="radarNodeCount">0</span></span>
+      </div>
+      <div style="display:flex;gap:12px">
+        <div class="card glow-cyan" style="flex:1;padding:0;overflow:hidden;position:relative">
+          <div id="radarUniverse" style="width:100%;min-height:500px;position:relative"></div>
+        </div>
+        <div id="radarSidebar" class="radar-sidebar" style="display:none">
+          <div class="radar-sidebar-close" onclick="closeRadarSidebar()">&times;</div>
+          <div id="radarSidebarContent"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub: Network Graph -->
+    <div id="isub-network" class="intel-sub-content">
+      <div class="network-controls" style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-sm active" onclick="filterNetwork('all')">All</button>
+        <button class="btn btn-sm" onclick="filterNetwork('account')">Accounts</button>
+        <button class="btn btn-sm" onclick="filterNetwork('relationship')">Relationships</button>
+        <button class="btn btn-sm" onclick="filterNetwork('subreddit')">Subreddits</button>
+        <span style="margin-left:auto;font-family:var(--font-data);font-size:11px;color:var(--text3)">Nodes: <span id="networkNodeCount">0</span></span>
+      </div>
+      <div class="card full glow-cyan" style="padding:0;overflow:hidden">
+        <div id="networkGraph" style="width:100%;min-height:500px;position:relative"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ TAB 4: COMMUNITIES ═══════ -->
+  <div id="tab-communities" class="tab-content">
+    <div class="stat-grid" id="commStats"></div>
+    <!-- Manual Actions -->
+    <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn primary" onclick="doControl('manage-communities')">Run Community Manager</button>
+      <button class="btn" onclick="doControl('animate-hubs')">Animate Hubs</button>
+      <button class="btn" onclick="doControl('scan-takeover')">Scan Takeover Targets</button>
+      <button class="btn" onclick="doControl('research')">Run Research</button>
+    </div>
+    <div class="grid">
+      <div class="card full glow-purple">
+        <h2>Managed Communities <span class="badge-count" id="commCount">0</span></h2>
+        <div id="commList"></div>
+      </div>
+      <div class="card glow-cyan">
+        <h2>Takeover Targets</h2>
+        <div id="takeoverTargets" class="feed" style="max-height:350px"></div>
+      </div>
+      <div class="card glow-blue">
+        <h2>Takeover Requests</h2>
+        <div id="takeoverRequests" class="feed" style="max-height:350px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ TAB 5: CONFIG (merged Accounts + Server) ═══════ -->
+  <div id="tab-config" class="tab-content">
+    <!-- Server Stats -->
+    <div class="stat-grid" id="serverStats"></div>
+    <div id="serverBars" style="margin-bottom:16px"></div>
+    <div class="grid">
+      <div class="card glow-blue">
+        <h2>Resource History</h2>
+        <div class="chart-wrap"><canvas id="chartResources"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>All Scheduled Jobs</h2>
+        <div id="scheduleListFull" style="max-height:350px;overflow-y:auto"></div>
+      </div>
+      <!-- Projects -->
+      <div class="card">
+        <h2>Projects <button class="btn btn-sm primary" onclick="openModal('addProject')">+ Add</button></h2>
+        <div id="projectsManage"></div>
+      </div>
+      <!-- Accounts -->
+      <div class="card">
+        <h2>Accounts <button class="btn btn-sm primary" onclick="openModal('addAccount')">+ Add</button></h2>
+        <div id="accountsManage"></div>
+      </div>
+      <!-- Cookies -->
+      <div class="card full">
+        <h2>Cookie Sessions <button class="btn btn-sm primary" onclick="openModal('pasteCookies')">Paste Cookies</button></h2>
+        <div id="cookiesStatus"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════ MODALS ═══════ -->
+
+<!-- Add Project Modal -->
+<div id="modal-addProject" class="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h3>Add New Project</h3>
+    <div class="form-row">
+      <div class="form-group"><label>Name *</label><input class="form-input" id="pName"></div>
+      <div class="form-group"><label>Type</label>
+        <select class="form-input" id="pType"><option>SaaS</option><option>E-commerce</option><option>App</option><option>Service</option><option>Other</option></select>
+      </div>
+    </div>
+    <div class="form-group"><label>URL *</label><input class="form-input" id="pUrl" placeholder="https://..."></div>
+    <div class="form-group"><label>Description *</label><input class="form-input" id="pDesc"></div>
+    <div class="form-row">
+      <div class="form-group"><label>Tagline</label><input class="form-input" id="pTagline"></div>
+      <div class="form-group"><label>Weight</label><input class="form-input" id="pWeight" type="number" step="0.1" value="1.0"></div>
+    </div>
+    <div class="form-group"><label>Selling Points (comma-sep)</label><input class="form-input" id="pSelling"></div>
+    <div class="form-group"><label>Target Audiences (comma-sep)</label><input class="form-input" id="pAudiences"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitProject()">Create Project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Project Modal -->
+<div id="modal-editProject" class="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h3>Edit Project: <span id="editProjName"></span></h3>
+    <div class="form-row">
+      <div class="form-group"><label>Enabled</label>
+        <select class="form-input" id="epEnabled"><option value="true">Yes</option><option value="false">No</option></select>
+      </div>
+      <div class="form-group"><label>Weight</label><input class="form-input" id="epWeight" type="number" step="0.1"></div>
+    </div>
+    <div class="form-group"><label>URL</label><input class="form-input" id="epUrl"></div>
+    <div class="form-group"><label>Description</label><input class="form-input" id="epDesc"></div>
+    <div class="form-group"><label>Tagline</label><input class="form-input" id="epTagline"></div>
+    <div class="form-group"><label>Tone Style</label>
+      <select class="form-input" id="epTone"><option>helpful_casual</option><option>expert</option><option>friendly</option><option>neutral</option></select>
+    </div>
+    <div class="form-group"><label>Reddit Primary Subreddits (comma-sep)</label><input class="form-input" id="epSubsPrimary"></div>
+    <div class="form-group"><label>Reddit Secondary Subreddits (comma-sep)</label><input class="form-input" id="epSubsSecondary"></div>
+    <div class="form-group"><label>Reddit Keywords (comma-sep)</label><input class="form-input" id="epRedditKw"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitEditProject()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Account Modal -->
+<div id="modal-addAccount" class="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h3>Add New Account</h3>
+    <div class="form-row">
+      <div class="form-group"><label>Platform *</label>
+        <select class="form-input" id="aPlat"><option value="reddit">Reddit</option><option value="telegram">Telegram</option></select>
+      </div>
+      <div class="form-group"><label>Username *</label><input class="form-input" id="aUser"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Password *</label><input class="form-input" id="aPass" type="password"></div>
+      <div class="form-group"><label>Email</label><input class="form-input" id="aEmail"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Persona</label>
+        <select class="form-input" id="aPersona"><option>helpful_casual</option><option>tech_expert</option><option>friendly_newbie</option><option>industry_insider</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label>Assign to Projects <span style="color:var(--text3);font-size:11px">(comma-separated, e.g. SoClose,HeyyBlog)</span></label>
+        <input class="form-input" id="aProjects" placeholder="Leave empty to assign to all projects">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitAccount()">Add Account</button>
+    </div>
+  </div>
+</div>
+
+<!-- Paste Cookies Modal -->
+<div id="modal-pasteCookies" class="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h3>Paste Cookies from Browser</h3>
+    <p style="color:var(--text2);font-size:12px;margin-bottom:14px">
+      Paste <code style="color:var(--accent)">document.cookie</code> from browser console, or a Netscape cookie file export (e.g. from cookie editor extension)
+    </p>
+    <div class="form-row">
+      <div class="form-group"><label>Platform *</label>
+        <select class="form-input" id="cookiePlat" onchange="loadCookieAccounts()"><option value="reddit">Reddit</option></select>
+      </div>
+      <div class="form-group"><label>Account *</label>
+        <select class="form-input" id="cookieAccount"></select>
+      </div>
+    </div>
+    <div class="form-group"><label>Cookies (document.cookie output) *</label>
+      <textarea class="form-input" id="cookieRaw" rows="5" placeholder="name=value; name2=value2; ..." style="font-family:var(--font-data);font-size:11px;resize:vertical"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitPasteCookies()">Save Cookies</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div id="toastContainer" class="toast-container"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

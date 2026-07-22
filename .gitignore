@@ -1,0 +1,84 @@
+# =============================================================================
+# MiloAgent — Git Ignore
+# =============================================================================
+
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Virtual Environment ───────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── IDE ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# ── Runtime Data (NEVER commit these) ────────────────────
+data/miloagent.db
+data/miloagent.db-shm
+data/miloagent.db-wal
+data/*.pid
+data/cookies/*.json
+data/sessions/*.session
+data/sessions/*.session-journal
+data/curator_cache/
+*.db-shm
+*.db-wal
+*.db-journal
+
+# ── Session & Cookie Files (contain auth tokens) ─────────
+*.session
+*.session-journal
+
+# ── Project configs with real credentials (NEVER commit) ──
+# The repo ships template configs in config/*.yaml — those are safe.
+# But server-side configs with real passwords MUST NOT be committed.
+# If you customize config files, use config/*.local.yaml naming.
+projects/*.yaml
+!projects/example_project.yaml
+!projects/nova.yaml
+
+# GEO tracking config holds paid API keys — never commit (ship .example only)
+config/geo.yaml
+
+# ── Server-side config overrides (NEVER commit) ──────────
+# On the server, rename real configs to *.local.yaml.
+# The code auto-detects .local.yaml and loads it instead.
+# e.g. config/llm.yaml (template) → config/llm.local.yaml (real keys)
+*.local.yaml
+
+# ── Old directory structures (purged from history) ────────
+miloagent/
+growthbot/config/
+growthbot/projects/
+
+# ── Logs ──────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Environment Variables (contain secrets) ───────────────
+.env
+.env.local
+
+# ── OS ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Backups ───────────────────────────────────────────────
+backups/
+
+# ── Docker ────────────────────────────────────────────────
+
+# ── Test artifacts ────────────────────────────────────────
+.pytest_cache/
+test_*.db*

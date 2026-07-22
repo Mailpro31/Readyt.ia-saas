@@ -1,0 +1,181 @@
+# =============================================================================
+# Nova — Voice dictation with automatic contextual reformatting (Windows)
+# =============================================================================
+# Repo: https://github.com/Mailpro31/nova-desktop   ·   Site: https://novaspeak.app
+# Marketing angles validated for Reddit: accessibility (ADHD, dysgraphia),
+# privacy (verifiable 100% offline engine), Dragon NaturallySpeaking alternative.
+# =============================================================================
+
+project:
+  name: "Nova"
+  url: "https://novaspeak.app"
+  base_url: "https://novaspeak.app"         # 1.1: used to build tracked links
+  type: "App"
+  description: >
+    Nova is a Windows desktop app (Tauri 2 — Rust core + React/TS UI) for voice
+    dictation with automatic contextual reformatting: it rewrites what you say
+    to fit the active app/tab (Email, Messages, AI Prompt, To-do, Notes...).
+    Two engines: Private Intelligence (100% local/offline — nothing leaves the
+    machine) and Turbo (cloud, faster). Freemium.
+  tagline: "Speak naturally. Nova formats it for wherever you're typing."
+  weight: 1.0
+  enabled: true
+
+  # 1.2: GEO / AEO AI-citation tracking. Probe queries live in config/geo.yaml
+  # under the "nova" key. brand_terms are additional strings counted as a Nova
+  # citation in an AI answer (geo_tracker also recognises "Nova" / "novaspeak").
+  geo:
+    enabled: true
+    brand_terms:
+      - "Nova"
+      - "novaspeak"
+      - "novaspeak.app"
+
+  selling_points:
+    - "Automatic contextual reformatting per app (Email, Messages, AI prompts, notes, to-do)"
+    - "100% offline Private Intelligence engine — nothing leaves your machine"
+    - "Built for accessibility: ADHD, dysgraphia, RSI, anyone who thinks faster than they type"
+    - "Freemium: unlimited local dictation on the free tier"
+
+  target_audiences:
+    - accessibility
+    - adhd
+    - writers
+    - developers
+    - privacy_conscious
+
+  business_profile:
+    socials:
+      twitter: ""
+      website: "https://novaspeak.app"
+      youtube: ""
+      tiktok: ""
+      discord: ""
+
+    features:
+      - name: "Contextual reformatting"
+        description: "Rewrites dictation to match the active app/tab automatically"
+      - name: "Private Intelligence engine"
+        description: "Fully local/offline speech + reformatting — verifiable privacy"
+      - name: "Turbo engine"
+        description: "Optional faster cloud engine for heavier reformatting"
+      - name: "Styles"
+        description: "Email, Messages, AI Prompt, To-do, Notes and (Ultra) custom styles"
+
+    pricing:
+      model: "freemium"
+      free_tier: "Unlimited local dictation + 3 Styles + weekly reformatting quota"
+      paid_plans:
+        - name: "Nova Pro"
+          price: "see novaspeak.app"
+          highlights: "Unlimited reformatting + all Styles"
+        - name: "Nova Ultra"
+          price: "see novaspeak.app"
+          highlights: "Custom Styles + max power profile"
+
+    faqs:
+      - q: "Does Nova work offline?"
+        a: "Yes — the Private Intelligence engine runs 100% locally; nothing is sent to a server."
+      - q: "Is there a free plan?"
+        a: "Yes: unlimited local dictation, 3 Styles, and a weekly reformatting quota."
+      - q: "How is it different from Dragon?"
+        a: "Nova adds automatic per-app reformatting and a verifiable offline engine, with a free tier."
+
+    # 2.3 groundwork: competitors are surfaced as priority opportunities by
+    # subreddit_intel when mentioned. trigger_keywords drive that scan.
+    competitors:
+      - name: "Dragon NaturallySpeaking"
+        differentiation: "Nova reformats per app automatically and has a free offline tier"
+        trigger_keywords: ["dragon naturallyspeaking", "dragon dictate", "nuance dragon"]
+      - name: "Otter.ai"
+        differentiation: "Nova is desktop dictation with local privacy, not cloud meeting transcription"
+        trigger_keywords: ["otter.ai", "otter ai"]
+      - name: "Talon Voice"
+        differentiation: "Nova targets everyday dictation + reformatting, no scripting required"
+        trigger_keywords: ["talon voice", "talonvoice"]
+      - name: "Wispr Flow"
+        differentiation: "Nova offers a verifiable 100% offline engine and per-app Styles"
+        trigger_keywords: ["wispr flow", "wisprflow"]
+
+    rules:
+      never_say:
+        - "Nova is completely free"           # it's freemium
+        - "Nova is the best dictation app"     # avoid superlatives
+        - "Nova cures ADHD"                    # never make medical claims
+      always_accurate:
+        - "Product name is exactly 'Nova'"
+        - "URL is novaspeak.app"
+        - "The Private Intelligence engine is fully offline"
+        - "Free tier includes unlimited local dictation"
+
+# =============================================================================
+# Reddit Targeting
+# =============================================================================
+reddit:
+  target_subreddits:
+    primary:
+      - "ADHD"
+      - "dysgraphia"
+      - "accessibility"
+      - "productivity"
+      - "dictation"
+    secondary:
+      - "Windows"
+      - "software"
+      - "writing"
+      - "programming"
+      - "RSI"
+
+  keywords:
+    - "voice typing windows"
+    - "dictation software"
+    - "speech to text app"
+    - "dragon naturallyspeaking alternative"
+    - "type by voice"
+    - "offline dictation"
+    - "voice to text privacy"
+    - "writing help adhd"
+
+  exclude_keywords:
+    - "phone only"
+    - "android app only"
+    - "macos only"
+
+  comment_style: "helpful_casual"
+  min_post_score: 1
+  max_post_age_hours: 48
+
+  owned_subreddits: []
+
+  allowed_domains:
+    - "novaspeak.app"
+
+# =============================================================================
+# Twitter / Telegram (disabled by default for Nova's Reddit-first launch)
+# =============================================================================
+twitter:
+  keywords:
+    - "voice typing"
+    - "dictation software"
+  hashtags:
+    - "#accessibility"
+    - "#ADHD"
+  tweet_style: "helpful_casual"
+
+telegram:
+  enabled: false
+  persona: "auto"
+  target_groups: ["auto"]
+  auto_discover: false
+  keywords: ["dictation", "accessibility"]
+  exclude_keywords: []
+  max_message_age_minutes: 120
+  message_style: "helpful_casual"
+
+# =============================================================================
+# Tone & Language
+# =============================================================================
+tone:
+  style: "helpful_casual"
+  language: "en"                            # switch to "fr" for francophone subs
+  formality: "casual"
