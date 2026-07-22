@@ -191,6 +191,25 @@ Suis la progression du warm-up : `GET /api/warmup` (barre « Jour 6/10 »).
 
 ---
 
+## Monitoring automatique (cron + alerte Telegram)
+
+Pour être prévenu si l'agent tombe, `scripts/monitor_cron.sh` lance le check
+chaque heure et envoie une **alerte Telegram uniquement aux transitions**
+(panne / rétablissement — pas de spam). Il réutilise le bot/chat de
+`config/telegram.yaml`.
+
+```bash
+chmod +x scripts/monitor_cron.sh scripts/check_deployment.sh
+crontab -e
+```
+Ajoute une ligne (adapte le chemin et le domaine) :
+```cron
+0 * * * * /home/ubuntu/nova-agent/scripts/monitor_cron.sh track.novaspeak.app >> /home/ubuntu/nova-agent/logs/monitor.log 2>&1
+```
+Test immédiat : `./scripts/monitor_cron.sh track.novaspeak.app`
+
+---
+
 ## Commandes utiles au quotidien
 
 ```bash
