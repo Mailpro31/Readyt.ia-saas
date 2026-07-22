@@ -164,6 +164,15 @@ docker compose exec miloagent python3 scripts/smoke_test_phase1.py
 # → attendu : RESULT: 8/8 checks passed — ALL PASS ✅
 ```
 
+Ou en **une seule commande** avec le script de vérification (conteneur, /health,
+/health/detailed, API warm-up, config, SSL public, smoke-test) :
+
+```bash
+./scripts/check_deployment.sh                       # tests locaux
+./scripts/check_deployment.sh track.novaspeak.app   # + tests HTTPS publics
+# → attendu : RÉSULTAT : N OK / 0 échec — déploiement sain ✅
+```
+
 Puis ouvre le **dashboard** : `https://track.novaspeak.app/login`
 (identifiants = `MILO_WEB_USER` / `MILO_WEB_PASS`).
 
