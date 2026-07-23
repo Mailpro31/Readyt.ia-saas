@@ -55,7 +55,9 @@ with sync_playwright() as p:
     context.add_cookies(pw_cookies)
     page = context.new_page()
     try:
-        page.goto("https://www.reddit.com/r/python/hot.json?limit=1", timeout=30000)
+        # old.reddit.com/api/me.json returns raw JSON even to a real browser
+        # (no React app shell takeover like www.reddit.com's *.json URLs).
+        page.goto("https://old.reddit.com/api/me.json", timeout=30000)
         content = page.content()
         title = page.title()
     except Exception as e:
@@ -71,8 +73,8 @@ with sync_playwright() as p:
 
     if "Blocked" in title or "Blocked" in content[:500]:
         print("FAIL: still blocked, even via real Chromium")
-    elif "python" in content.lower() or content.strip().startswith("{"):
-        print("PASS: looks like real Reddit content came through")
+    elif '"name"' in content or '"data"' in content:
+        print("PASS: authenticated JSON came through — cookies + browser work!")
     else:
         print("UNCLEAR: neither a clear block nor clear success — check the screenshot")
 
