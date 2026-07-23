@@ -316,16 +316,29 @@ class Orchestrator:
         """Get or create a Reddit bot for an account."""
         username = account["username"]
         if username not in self._reddit_bots:
+            # Resolve proxy: per-account > reddit-specific > global (same
+            # precedence as Twitter). Reddit aggressively blocks many VPS/
+            # datacenter IP ranges, so this is often required in practice.
+            http_cfg = self.settings.get("http", {})
+            proxy = (
+                account.get("proxy")
+                or http_cfg.get("reddit_proxy")
+                or http_cfg.get("proxy")
+            )
+            account_with_proxy = dict(account)
+            if proxy:
+                account_with_proxy["proxy"] = proxy
+
             reddit_cfg = load_yaml(f"{self.config_dir}/reddit_accounts.yaml")
             auth_mode = reddit_cfg.get("auth_mode", "web")
             if auth_mode == "api" and account.get("client_id"):
                 self._reddit_bots[username] = RedditBot(
-                    self.db, self.content_gen, account
+                    self.db, self.content_gen, account_with_proxy
                 )
             else:
                 from platforms.reddit_web import RedditWebBot
                 self._reddit_bots[username] = RedditWebBot(
-                    self.db, self.content_gen, account
+                    self.db, self.content_gen, account_with_proxy
                 )
         return self._reddit_bots[username]
 

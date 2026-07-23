@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
 import praw
+import requests
 
 from platforms.base_platform import BasePlatform
 from core.database import Database
@@ -35,12 +36,22 @@ class RedditBot(BasePlatform):
     ):
         super().__init__(db, content_gen, account_config)
         self.account_config = account_config
+
+        requestor_kwargs = {}
+        proxy_url = account_config.get("proxy")
+        if proxy_url:
+            proxy_session = requests.Session()
+            proxy_session.proxies.update({"http": proxy_url, "https": proxy_url})
+            requestor_kwargs["session"] = proxy_session
+            logger.info(f"Reddit bot for {account_config['username']}: using proxy")
+
         self.reddit = praw.Reddit(
             client_id=account_config["client_id"],
             client_secret=account_config["client_secret"],
             username=account_config["username"],
             password=account_config["password"],
             user_agent=account_config["user_agent"],
+            requestor_kwargs=requestor_kwargs or None,
         )
         self._username = account_config["username"]
 

@@ -109,6 +109,16 @@ class RedditWebBot(BasePlatform):
         _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
         self.session.mount("https://", _adapter)
         self.session.mount("http://", _adapter)
+
+        # Proxy support: Reddit aggressively blocks many VPS/datacenter IP
+        # ranges. account_config["proxy"] (resolved by the orchestrator from
+        # settings.yaml http.reddit_proxy, or per-account) routes ALL Reddit
+        # traffic for this bot through it.
+        proxy_url = account_config.get("proxy")
+        if proxy_url:
+            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+            logger.info(f"Reddit bot for {self._username}: using proxy")
+
         self._authenticated = False
         self._modhash = ""
 
