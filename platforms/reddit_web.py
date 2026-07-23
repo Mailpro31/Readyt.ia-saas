@@ -1381,6 +1381,91 @@ class RedditWebBot(BasePlatform):
             logger.error(f"Upvote error: {e}")
             return False
 
+    def neutral_warmup_action(
+        self,
+        subreddit: str,
+        comment_text: Optional[str] = None,
+    ) -> Dict:
+        """Perform ONE neutral warm-up action in a product-unrelated subreddit.
+
+        If ``comment_text`` is given, posts it as a reply on a hot post;
+        otherwise upvotes a hot post. Never mentions any product and never
+        includes links — its only purpose is to accrue karma / account age.
+        Mirrors platforms/reddit_bot.py's method for the cookie-auth path.
+
+        Returns ``{"ok": bool, "action": str, "target_id": str, "error": str}``.
+        """
+        action = "comment" if comment_text else "upvote"
+        if not self._ensure_auth():
+            return {"ok": False, "action": action, "target_id": "",
+                    "error": "auth failed"}
+        try:
+            candidates = self._browse_subreddit(subreddit, sort="hot", limit=15)
+            posts = [
+                p for p in candidates
+                if not p.get("stickied") and not p.get("locked")
+                and not p.get("over_18")
+            ] or candidates
+            if not posts:
+                return {"ok": False, "action": action, "target_id": "",
+                        "error": "no posts found"}
+            post = random.choice(posts[:10])
+            post_id = post.get("id", "")
+            fullname = post.get("name") or f"t3_{post_id}"
+
+            if comment_text:
+                if not self._modhash:
+                    return {"ok": False, "action": action, "target_id": post_id,
+                            "error": "no modhash (CSRF token)"}
+                resp = self.session.post(
+                    f"{REDDIT_OLD}/api/comment",
+                    data={
+                        "thing_id": fullname,
+                        "text": comment_text,
+                        "uh": self._modhash,
+                        "api_type": "json",
+                    },
+                    headers={
+                        "User-Agent": self.session.headers.get("User-Agent", _random_ua()),
+                        "Referer": f"{REDDIT_OLD}/r/{subreddit}/",
+                        "Origin": REDDIT_OLD,
+                    },
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    return {"ok": False, "action": action, "target_id": post_id,
+                            "error": f"http {resp.status_code}"}
+                try:
+                    errors = resp.json().get("json", {}).get("errors", [])
+                except Exception:
+                    errors = []
+                if errors:
+                    return {"ok": False, "action": action, "target_id": post_id,
+                            "error": str(errors)}
+                ok = True
+            else:
+                ok = self.upvote(fullname)
+
+            if ok:
+                self.db.log_action(
+                    platform="reddit",
+                    action_type=f"warmup_{action}",
+                    account=self._username,
+                    project="_warmup",
+                    target_id=post_id,
+                    content=comment_text or "",
+                    metadata={"subreddit": subreddit},
+                )
+                return {"ok": True, "action": action, "target_id": post_id, "error": ""}
+            return {"ok": False, "action": action, "target_id": post_id,
+                    "error": "post failed"}
+        except Exception as e:
+            logger.warning(
+                "Warm-up %s failed in r/%s for %s: %s",
+                action, subreddit, self._username, e,
+            )
+            return {"ok": False, "action": action, "target_id": "", "error": str(e)}
+
     def subscribe(self, subreddit: str) -> bool:
         """Subscribe to a subreddit."""
         if not self._ensure_auth():
