@@ -55,9 +55,11 @@ with sync_playwright() as p:
     context.add_cookies(pw_cookies)
     page = context.new_page()
     try:
-        # old.reddit.com/api/me.json returns raw JSON even to a real browser
-        # (no React app shell takeover like www.reddit.com's *.json URLs).
-        page.goto("https://old.reddit.com/api/me.json", timeout=30000)
+        # www.reddit.com (modern site) wasn't blocked in the previous run,
+        # unlike old.reddit.com. Load the homepage and look for the logged-in
+        # username to confirm the session/cookies are actually recognized.
+        page.goto("https://www.reddit.com/", timeout=30000)
+        page.wait_for_timeout(3000)  # let the React app hydrate
         content = page.content()
         title = page.title()
     except Exception as e:
@@ -73,8 +75,10 @@ with sync_playwright() as p:
 
     if "Blocked" in title or "Blocked" in content[:500]:
         print("FAIL: still blocked, even via real Chromium")
-    elif '"name"' in content or '"data"' in content:
-        print("PASS: authenticated JSON came through — cookies + browser work!")
+    elif "ArchiTekte" in content:
+        print("PASS: logged-in username found on page — session recognized!")
+    elif "log in" in content.lower() or "se connecter" in content.lower():
+        print("PARTIAL: page loaded (not blocked) but appears logged OUT")
     else:
         print("UNCLEAR: neither a clear block nor clear success — check the screenshot")
 
