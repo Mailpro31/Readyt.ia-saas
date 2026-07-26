@@ -297,8 +297,15 @@ async def _resolve_query_id(gql_client, operation_name: str, hardcoded_id: str,
         # Re-check after acquiring the lock (another call may have just discovered).
         if not force and operation_name in _gql_id_cache:
             return _gql_id_cache[operation_name]
-        if not force and (now - _gql_last_discovery) < _GQL_DISCOVERY_MIN_INTERVAL:
-            return hardcoded_id
+        # This throttle applies EVEN when force=True: force only means "don't
+        # trust a cache HIT", it must never mean "rescan every JS bundle on
+        # every single 404". Without this, a burst of 404s (e.g. several
+        # search terms in the same scan cycle, each retrying) triggers a full
+        # bundle rescan per call — dozens of extra requests to x.com in
+        # seconds, which is exactly the kind of bot-like burst that gets an
+        # account rate-limited (429), observed live.
+        if (now - _gql_last_discovery) < _GQL_DISCOVERY_MIN_INTERVAL:
+            return _gql_id_cache.get(operation_name, hardcoded_id)
         _gql_last_discovery = now
         seed_cookies = {}
         try:

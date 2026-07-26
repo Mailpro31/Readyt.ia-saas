@@ -369,28 +369,14 @@ class TwitterBot(BasePlatform):
 
             stats["terms_tried"] += 1
             try:
-                # X's search endpoint has been observed 404ing intermittently
-                # (not a stale-ID or auth problem — confirmed via live
-                # diagnostics: the exact same call sometimes 200s with real
-                # results, sometimes 404s, on the same session seconds apart —
-                # consistent with anti-bot rate-limiting on a fresh account).
-                # Retry a couple times with a short pause before giving up on
-                # this term for the cycle.
-                tweets = None
-                last_404 = None
-                for attempt in range(3):
-                    try:
-                        tweets = await self.client.search_tweet(term, product="Latest")
-                        last_404 = None
-                        break
-                    except Exception as e:
-                        if "404" not in str(e) and type(e).__name__ != "NotFound":
-                            raise
-                        last_404 = e
-                        if attempt < 2:
-                            await asyncio.sleep(random.uniform(2, 5))
-                if last_404 is not None:
-                    raise last_404
+                # NOTE: retrying a 404 here (on top of the gql patch's own
+                # internal 1-retry-with-rediscovery in twikit_patch.py) was
+                # tried and reverted — the two retry layers compounded into a
+                # burst of dozens of requests to x.com per scan, which got the
+                # account 429 rate-limited. One attempt per term per cycle;
+                # a failed term is simply retried on the NEXT scan cycle
+                # (~10-12min later), a much gentler cadence.
+                tweets = await self.client.search_tweet(term, product="Latest")
                 # Reset failure counter on success
                 self._keyword_failures[term] = 0
                 added = _process_tweets(tweets, term)
