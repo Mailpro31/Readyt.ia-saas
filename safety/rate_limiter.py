@@ -35,6 +35,17 @@ class RateLimiter:
         self._bot_settings = settings.get("bot", {})
         self._mode = self._bot_settings.get("mode", "background")
 
+        # Resolve "auto" the same way the orchestrator does, otherwise the
+        # mode-specific scheduling lookup below silently falls back to the
+        # "background" block (e.g. active_hours [9,22]) instead of the intended
+        # server/full config — which quietly keeps the bot "asleep".
+        if self._mode == "auto":
+            try:
+                from core.environment import detect_environment
+                self._mode = detect_environment()["recommended_mode"]
+            except Exception:
+                self._mode = "server"
+
         # Action count cache: "account:platform" -> (count, fetched_at)
         self._action_count_cache: Dict[str, Tuple[int, float]] = {}
 
