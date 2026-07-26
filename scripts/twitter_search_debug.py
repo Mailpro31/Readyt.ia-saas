@@ -80,9 +80,44 @@ def main():
                 print(f"  {len(items)} entr(y/ies)")
                 entry_ids = [it.get("entryId", "?") for it in items[:10]]
                 print(f"  Sample entryIds: {entry_ids}")
-                tweet_like = [e for e in entry_ids if e.startswith(("tweet", "search-grid"))]
+                tweet_like = [
+                    it for it in items
+                    if it.get("entryId", "").startswith(("tweet", "search-grid"))
+                ]
                 print(f"  Of those, {len(tweet_like)} look like actual tweets "
                       f"(entryId starts with 'tweet'/'search-grid')")
+
+                # Deep-dive into ONE real entry with our own patch's exact
+                # extraction logic, so we see PRECISELY why it does/doesn't
+                # resolve a valid tweet — instead of guessing.
+                if tweet_like:
+                    entry = tweet_like[0]
+                    print(f"\n  == Deep dive on entry {entry.get('entryId')} ==")
+                    content = entry.get("content", {})
+                    print(f"  entry['content'] keys: {list(content.keys())}")
+                    item_content = content.get("itemContent", {})
+                    print(f"  content['itemContent'] keys: {list(item_content.keys())}")
+
+                    from platforms.twikit_patch import _extract_tweet_data
+                    tweet_data, how = _extract_tweet_data(entry)
+                    print(f"  _extract_tweet_data() resolved via: {how}")
+                    if tweet_data:
+                        print(f"  resolved dict keys: {list(tweet_data.keys())}")
+                        print(f"  has 'core': {'core' in tweet_data}")
+                        print(f"  has 'legacy': {'legacy' in tweet_data}")
+                        print(f"  has 'tweet' (visibility wrapper): {'tweet' in tweet_data}")
+                        if "tweet" in tweet_data:
+                            inner = tweet_data["tweet"]
+                            print(f"  inner tweet dict keys: {list(inner.keys()) if isinstance(inner, dict) else inner}")
+                        if "core" not in tweet_data and "core" not in tweet_data.get("tweet", {}):
+                            print("\n  'core' missing everywhere — dumping the full "
+                                  "resolved dict (first 4000 chars) for ground truth:")
+                            print(json.dumps(tweet_data, indent=2)[:4000])
+                    else:
+                        print("  resolved to: None (nothing found at all)")
+                        print("\n  Dumping the FULL raw entry (first 4000 chars) "
+                              "for ground truth:")
+                        print(json.dumps(entry, indent=2)[:4000])
             else:
                 print("  → No 'entries' key anywhere in the instructions. "
                       "This means X's response used a different key/shape "
