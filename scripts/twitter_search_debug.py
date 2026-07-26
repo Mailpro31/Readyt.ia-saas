@@ -113,6 +113,37 @@ def main():
                             print("\n  'core' missing everywhere — dumping the full "
                                   "resolved dict (first 4000 chars) for ground truth:")
                             print(json.dumps(tweet_data, indent=2)[:4000])
+                        elif "core" in tweet_data:
+                            # core/legacy ARE present — try building the real
+                            # Tweet/User objects, same as the patch does, to
+                            # see if construction itself fails further down
+                            # (a KeyError here gets silently swallowed by
+                            # twikit's own `except KeyError: tweet = None`).
+                            core = tweet_data.get("core") or {}
+                            user_results = core.get("user_results") or {}
+                            print(f"\n  core keys: {list(core.keys())}")
+                            print(f"  core['user_results'] keys: {list(user_results.keys())}")
+                            if "result" in user_results:
+                                user_data = user_results["result"]
+                                print(f"  user_data keys: {list(user_data.keys())[:20]}")
+                                try:
+                                    from twikit.tweet import Tweet
+                                    from twikit.user import User
+                                    u = User(bot.client, user_data)
+                                    t = Tweet(bot.client, tweet_data, u)
+                                    print(f"\n  ✅ Tweet/User construction SUCCEEDED: "
+                                          f"id={t.id!r} text={getattr(t, 'text', '?')!r:.80}")
+                                except Exception as e:
+                                    import traceback
+                                    print(f"\n  ❌ Tweet/User construction FAILED: "
+                                          f"{type(e).__name__}: {e}")
+                                    print("  Full traceback:")
+                                    traceback.print_exc()
+                                    print(f"\n  legacy keys: {list((tweet_data.get('legacy') or {}).keys())}")
+                            else:
+                                print("  'result' missing from core['user_results'] — "
+                                      "dumping core (first 2000 chars):")
+                                print(json.dumps(core, indent=2)[:2000])
                     else:
                         print("  resolved to: None (nothing found at all)")
                         print("\n  Dumping the FULL raw entry (first 4000 chars) "

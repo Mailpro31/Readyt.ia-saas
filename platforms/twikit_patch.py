@@ -450,10 +450,21 @@ def _make_patched_tweet_from_data():
     from twikit.tweet import Tweet
     from twikit.user import User
 
-    def _patched(client, data):
+    def _diag(reason: str, **ctx):
         global _parse_diag_logged
+        if _parse_diag_logged:
+            return
+        _parse_diag_logged = True
+        logger.warning(
+            "twikit_patch: tweet parse failed (%s). Context: %s",
+            reason, {k: (v if not isinstance(v, dict) else list(v.keys())[:15])
+                     for k, v in ctx.items()},
+        )
+
+    def _patched(client, data):
         tweet_data, how = _extract_tweet_data(data)
         if not tweet_data:
+            _diag("no tweet_data resolved at all")
             return None
 
         if tweet_data.get("__typename") == "TweetTombstone":
@@ -462,20 +473,38 @@ def _make_patched_tweet_from_data():
             tweet_data = tweet_data["tweet"]
 
         if "core" not in tweet_data or "legacy" not in tweet_data:
+            _diag(
+                "missing core/legacy after resolution",
+                how=how, resolved_keys=tweet_data,
+            )
+            return None
+
+        core = tweet_data.get("core") or {}
+        user_results = core.get("user_results") or {}
+        if "result" not in user_results:
+            _diag(
+                "core.user_results.result missing",
+                how=how, core_keys=core, user_results_keys=user_results,
+            )
+            return None
+
+        user_data = user_results["result"]
+        try:
+            return Tweet(client, tweet_data, User(client, user_data))
+        except Exception as e:
+            # Don't let this vanish into client.py's broad `except KeyError:
+            # tweet = None` — log exactly what failed, once, with a traceback.
             if not _parse_diag_logged:
                 _parse_diag_logged = True
                 logger.warning(
-                    "twikit_patch: tweet parse failed via %s — entry resolved "
-                    "to a dict with keys %s (missing 'core' or 'legacy'). "
-                    "X's tweet-result shape may have changed further.",
-                    how, list(tweet_data.keys())[:15],
+                    "twikit_patch: Tweet/User construction failed: %s: %s "
+                    "(legacy_keys=%s, user_data_keys=%s)",
+                    type(e).__name__, e,
+                    list((tweet_data.get("legacy") or {}).keys())[:20],
+                    list(user_data.keys())[:20] if isinstance(user_data, dict) else user_data,
+                    exc_info=True,
                 )
-            return None
-        if "result" not in tweet_data.get("core", {}).get("user_results", {}):
-            return None
-
-        user_data = tweet_data["core"]["user_results"]["result"]
-        return Tweet(client, tweet_data, User(client, user_data))
+            raise
 
     return _patched
 
