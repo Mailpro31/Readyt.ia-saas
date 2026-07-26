@@ -835,12 +835,47 @@ class Orchestrator:
                     proj = futures[fut].get("project", {}).get("name", "?")
                     logger.error(f"Scan worker crash for {proj}: {e}")
 
+        # Twitter scan — sequential (twikit is async / event-loop sensitive,
+        # so it must not run inside the parallel Reddit thread pool). Only
+        # projects with twitter.enabled and an available X account are scanned.
+        self._scan_twitter_all()
+
         # Notify Telegram (one message per cycle)
         total_opps = self.db.get_pending_opportunities(limit=100)
         if total_opps:
             from dashboard.telegram_bot import _SCAN_DONE_MSGS, _pick
             self._send_telegram_alert(_pick(_SCAN_DONE_MSGS, n=len(total_opps)))
         logger.info("Scan cycle complete")
+
+    @staticmethod
+    def _project_twitter_enabled(project: Dict) -> bool:
+        """Whether a project opts into X/Twitter scanning + acting."""
+        return bool(project.get("twitter", {}).get("enabled"))
+
+    def _scan_twitter_all(self):
+        """Scan X/Twitter for every project that has it enabled.
+
+        Kept sequential on purpose: twikit clients are bound to an asyncio
+        event loop, so concurrent scans across threads cause loop-mismatch
+        errors. Each project is isolated in its own try/except so one failure
+        never aborts the others.
+        """
+        for project in self.projects:
+            if not self._project_twitter_enabled(project):
+                continue
+            if not self._check_resources():
+                return
+            proj_name = project.get("project", {}).get("name", "unknown")
+            try:
+                account = self.account_mgr.get_next_account("twitter", project=proj_name)
+                if not account:
+                    logger.debug(f"Twitter scan {proj_name}: no account available")
+                    continue
+                bot = self._get_twitter_bot(account)
+                opps = bot.scan(project)
+                logger.info(f"Twitter scan for {proj_name}: {len(opps)} opportunities")
+            except Exception as e:
+                logger.error(f"Twitter scan error for {proj_name}: {e}")
 
     def _limit_scan_targets(self, project: Dict) -> Dict:
         """Limit subreddits and keywords per scan cycle (round-robin rotation).
@@ -962,8 +997,13 @@ class Orchestrator:
         """Act on the best opportunity for a single project. Returns True if action taken."""
         proj_name = project.get("project", {}).get("name", "unknown")
 
-        # Rotate starting platform each cycle (thread-safe)
-        platforms = ["reddit", "telegram"]  # Twitter disabled: server IP blocked (code 226)
+        # Rotate starting platform each cycle (thread-safe). Twitter is only
+        # in the rotation when the project opts in (twitter.enabled); otherwise
+        # it's skipped entirely. Historically disabled because X blocks many
+        # VPS IPs (code 226) — fine again on a residential IP.
+        platforms = ["reddit", "telegram"]
+        if self._project_twitter_enabled(project):
+            platforms.append("twitter")
         with self._state_lock:
             start = self._platform_turn % len(platforms)
             self._platform_turn += 1
