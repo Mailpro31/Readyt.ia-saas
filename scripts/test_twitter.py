@@ -91,14 +91,34 @@ def main():
             print("→ X wants 2FA. Add `totp_secret` to config/twitter_accounts.yaml.")
         sys.exit(1)
 
-    if ok:
-        print("\nPASS: connected to X — the account is usable.")
-        print("The bot will scan + reply on its next scan cycle (~10 min).")
-        sys.exit(0)
-    else:
+    if not ok:
         print("\nFAIL: could not authenticate (see the error log line above).")
         print("Common causes: expired cookies, wrong password, 2FA required,")
         print("or X blocking this IP (code 226 on VPS/datacenter ranges).")
+        sys.exit(1)
+
+    print("\nPASS: connected to X — the account is usable.")
+
+    # Real scan — this exercises the x-client-transaction-id path (where the
+    # 'Couldn't get KEY_BYTE indices' break happens). This is the true test of
+    # the twikit patch.
+    print("\nRunning a real scan (tests the twikit transaction-id fix) ...")
+    try:
+        project = _load_yaml("projects/nova.yaml")
+        # scan_async reads project['twitter']['keywords'] and project['project']['name']
+        opps = bot.scan(project)
+        print(f"\nPASS: scan completed — {len(opps)} opportunities found.")
+        print("The twikit patch works: X's anti-bot token is being generated.")
+        print("The bot will now scan + reply on its normal cycle.")
+        sys.exit(0)
+    except Exception as e:
+        msg = str(e)
+        print(f"\nFAIL: scan error: {type(e).__name__}: {msg}")
+        if "KEY_BYTE" in msg or "ondemand" in msg or "ClientTransaction" in msg:
+            print("→ Still the twikit transaction-id issue. The patch's "
+                  "diagnostic snippet above shows X's real format —")
+            print("  send the FULL output back, or run:")
+            print("    python3 scripts/twitter_transaction_debug.py")
         sys.exit(1)
 
 
