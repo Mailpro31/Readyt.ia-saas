@@ -107,8 +107,23 @@ def main():
         project = _load_yaml("projects/nova.yaml")
         # scan_async reads project['twitter']['keywords'] and project['project']['name']
         opps = bot.scan(project)
+        stats = getattr(bot, "_last_scan_stats", {}) or {}
         print(f"\nPASS: scan completed — {len(opps)} opportunities found.")
         print("The twikit patch works: X's anti-bot token is being generated.")
+        if not opps:
+            tried = stats.get("terms_tried", 0)
+            ok, empty, errors = (
+                stats.get("terms_ok", 0),
+                stats.get("terms_empty", 0),
+                stats.get("terms_error", 0),
+            )
+            print(f"Terms: {tried} tried, {ok} ok, {empty} empty, {errors} errored.")
+            if errors:
+                print("Sample per-term errors (this is why 0 opportunities):")
+                for s in stats.get("sample_errors", []):
+                    print(f"  • {s}")
+            elif tried:
+                print("No errors — genuinely no matching tweets right now (normal).")
         print("The bot will now scan + reply on its normal cycle.")
         sys.exit(0)
     except Exception as e:

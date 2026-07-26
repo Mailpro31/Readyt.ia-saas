@@ -110,6 +110,7 @@ class TwitterBot(BasePlatform):
         self._loop_gen = 0  # Track which loop generation client was created on
         self._keyword_failures: Dict[str, int] = {}  # keyword -> consecutive 404 count
         self._term_rotation = 0  # round-robin index across scan cycles
+        self._last_scan_stats: Dict = {}  # diagnostics from the last scan_async call
         self._proxy = proxy  # HTTP proxy for Cloudflare bypass
 
         # Ensure cookies directory exists
@@ -338,17 +339,32 @@ class TwitterBot(BasePlatform):
                 )
             return added
 
+        # Per-scan diagnostics — per-term failures are caught (so one bad term
+        # doesn't abort the whole scan), but that also means a scan can report
+        # "success" while every term silently failed underneath. Track outcomes
+        # here so callers (e.g. /testtwitter) can surface the REAL cause instead
+        # of just "0 opportunities found".
+        stats = {
+            "terms_tried": 0, "terms_empty": 0, "terms_ok": 0,
+            "terms_error": 0, "last_error": "", "sample_errors": [],
+        }
+
         for term in search_terms:
             # Skip terms that have failed 3+ times in a row (404 etc)
             if self._keyword_failures.get(term, 0) >= 3:
                 logger.debug(f"Skipping term '{term}' (failed {self._keyword_failures[term]}x)")
                 continue
 
+            stats["terms_tried"] += 1
             try:
                 tweets = await self.client.search_tweet(term, product="Latest")
                 # Reset failure counter on success
                 self._keyword_failures[term] = 0
-                _process_tweets(tweets, term)
+                added = _process_tweets(tweets, term)
+                if tweets:
+                    stats["terms_ok"] += 1
+                else:
+                    stats["terms_empty"] += 1
 
                 # Page through additional result pages for wider coverage.
                 page = 1
@@ -359,12 +375,16 @@ class TwitterBot(BasePlatform):
                         break
                     if not tweets:
                         break
-                    _process_tweets(tweets, term)
+                    added += _process_tweets(tweets, term)
                     page += 1
                     await asyncio.sleep(random.uniform(0.8, 2.0))
 
             except Exception as e:
                 err_str = str(e)
+                stats["terms_error"] += 1
+                stats["last_error"] = f"{type(e).__name__}: {err_str}"
+                if len(stats["sample_errors"]) < 3:
+                    stats["sample_errors"].append(f"'{term}': {stats['last_error']}")
                 # Known upstream breakage: X changed its ondemand.s.js bundle
                 # (~2026-03-18) and twikit 2.3.3 can no longer build the
                 # required x-client-transaction-id header. If our runtime patch
@@ -392,9 +412,12 @@ class TwitterBot(BasePlatform):
         opportunities.sort(
             key=lambda x: x.get("relevance_score", 0), reverse=True
         )
+        self._last_scan_stats = stats
         logger.info(
             f"Twitter scan for {project_name}: found {len(opportunities)} "
-            f"opportunities across {len(search_terms)} terms"
+            f"opportunities across {len(search_terms)} terms "
+            f"(ok={stats['terms_ok']}, empty={stats['terms_empty']}, "
+            f"errors={stats['terms_error']})"
         )
         return opportunities
 

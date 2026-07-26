@@ -1487,10 +1487,42 @@ class TelegramDashboard:
                 )
                 return
             opps = bot.scan(project)
-            self.send_alert_sync(
-                f"🐦 X test: ✅ connected + scan OK — found {len(opps)} "
-                f"opportunities. The bot will reply on its normal cycle."
-            )
+            stats = getattr(bot, "_last_scan_stats", {}) or {}
+
+            if opps:
+                self.send_alert_sync(
+                    f"🐦 X test: ✅ connected + scan OK — found {len(opps)} "
+                    f"opportunities. The bot will reply on its normal cycle."
+                )
+                return
+
+            # 0 opportunities: distinguish "genuinely no matches" from
+            # "every search silently failed" instead of just saying "0 found".
+            tried = stats.get("terms_tried", 0)
+            ok = stats.get("terms_ok", 0)
+            empty = stats.get("terms_empty", 0)
+            errors = stats.get("terms_error", 0)
+            if errors and errors == tried:
+                sample = "\n".join(f"  • {s}" for s in stats.get("sample_errors", []))
+                self.send_alert_sync(
+                    f"🐦 X test: ⚠️ connected, but ALL {tried} search terms "
+                    f"failed (0 succeeded) — that's why 0 opportunities.\n"
+                    f"Sample errors:\n{sample or stats.get('last_error', '?')}"
+                )
+            elif errors:
+                self.send_alert_sync(
+                    f"🐦 X test: ✅ connected + scan ran ({ok} ok, {empty} empty, "
+                    f"{errors} failed out of {tried} terms) — found 0 "
+                    f"opportunities this time. Last error: {stats.get('last_error', '?')}\n"
+                    f"This can be normal (no matching tweets right now); "
+                    f"it'll keep trying on the next cycle."
+                )
+            else:
+                self.send_alert_sync(
+                    f"🐦 X test: ✅ connected + scan OK ({tried} terms searched, "
+                    f"no errors) — genuinely 0 matching tweets right now. "
+                    f"Normal — it'll keep scanning on the normal cycle."
+                )
         except Exception as e:
             msg = str(e)
             detail = f"{type(e).__name__}: {msg}" if msg else type(e).__name__
