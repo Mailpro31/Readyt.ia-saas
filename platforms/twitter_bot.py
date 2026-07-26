@@ -329,6 +329,26 @@ class TwitterBot(BasePlatform):
 
             except Exception as e:
                 err_str = str(e)
+                # Known upstream breakage: X changed its ondemand.s.js bundle
+                # (~2026-03-18) and twikit 2.3.3 can no longer build the
+                # required x-client-transaction-id header, so every authed
+                # request fails identically. This affects ALL twikit users
+                # regardless of IP/cookies — tracked at github.com/d60/twikit
+                # issues #408 / PR #411 (no fixed release yet). Log it once and
+                # stop hammering every keyword with the same error.
+                if (
+                    "KEY_BYTE" in err_str
+                    or "ClientTransaction" in err_str
+                    or "client transaction" in err_str.lower()
+                ):
+                    logger.warning(
+                        "Twitter/X scan skipped: twikit can't generate X's "
+                        "anti-bot token (x-client-transaction-id). Known "
+                        "upstream break since 2026-03-18 (twikit #408) — NOT "
+                        "an IP or cookie problem. X will work again once "
+                        "twikit ships a fix. Underlying error: %s", err_str
+                    )
+                    break
                 logger.error(f"Twitter scan error for '{keyword}': {err_str}")
                 # Track persistent failures (404s) to skip them next cycle
                 if "404" in err_str or "not found" in err_str.lower():
