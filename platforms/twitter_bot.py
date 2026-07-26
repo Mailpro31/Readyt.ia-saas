@@ -733,6 +733,81 @@ class TwitterBot(BasePlatform):
             _run_async_safe, self.warm_up_async(project)
         )
 
+    async def neutral_warmup_action_async(
+        self, keywords: Optional[List[str]] = None, follow_prob: float = 0.3
+    ) -> Dict:
+        """Perform ONE neutral warm-up action (like a niche tweet, maybe follow).
+
+        Used by the progressive WarmupScheduler to build the account's
+        engagement footprint before it ever promotes. Returns a small dict:
+        {"ok": bool, "action": str, "target_id": str, "error": str}.
+        """
+        await self.authenticate()
+        kws = keywords or [
+            "technology", "productivity", "writing", "accessibility"
+        ]
+        keyword = random.choice(kws)
+        try:
+            tweets = await self.client.search_tweet(keyword, product="Top")
+        except Exception as e:
+            return {"ok": False, "action": "search", "error": str(e)}
+
+        tweets = list(tweets or [])
+        if not tweets:
+            return {"ok": False, "action": "search", "error": "no tweets found"}
+
+        tweet = random.choice(tweets[:10])
+        tweet_id = str(tweet.id)
+        action = "like"
+        try:
+            ok = await self.like_async(tweet_id)
+        except Exception as e:
+            return {"ok": False, "action": "like", "error": str(e)}
+
+        # Occasionally follow the author too — natural engagement footprint.
+        if (
+            random.random() < follow_prob
+            and hasattr(tweet, "user") and tweet.user
+        ):
+            try:
+                if await self.follow_async(str(tweet.user.id)):
+                    action = "follow"
+            except Exception:
+                pass
+
+        if ok:
+            try:
+                self.db.log_action(
+                    platform="twitter",
+                    action_type=f"warmup_{action}",
+                    account=self._username,
+                    project="_warmup",
+                    target_id=tweet_id,
+                    content=f"warmup: {keyword}",
+                )
+            except Exception:
+                pass
+        return {"ok": bool(ok), "action": action, "target_id": tweet_id}
+
+    def neutral_warmup_action(
+        self, keywords: Optional[List[str]] = None, follow_prob: float = 0.3, **_kw
+    ) -> Dict:
+        """Sync wrapper for neutral_warmup_action_async."""
+        return self._retry_on_loop_error(
+            _run_async_safe,
+            self.neutral_warmup_action_async(keywords, follow_prob),
+        )
+
+    def get_account_info(self) -> Dict:
+        """Return basic account info (followers) for warm-up metric tracking."""
+        try:
+            info = _run_async_safe(self.get_user_by_name_async(self._username))
+            if info:
+                return {"followers": info.get("followers_count", 0)}
+        except Exception:
+            pass
+        return {"followers": 0}
+
     def _human_reading_delay(self, tweet_text: str, reply_text: str) -> float:
         """Calculate human-like delay for reading a tweet and typing a reply."""
         tweet_words = len(tweet_text.split())

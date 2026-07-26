@@ -282,21 +282,21 @@ class AccountManager:
                 # may only run on a "ready" account. Accounts still warming are
                 # excluded; accounts with no warm-up row are treated as ready
                 # (backward compat with pre-existing established accounts).
-                if platform == "reddit":
+                if platform in ("reddit", "twitter"):
                     ready = [
                         a for a in available
-                        if self.is_warmup_ready(a["username"])
+                        if self.is_warmup_ready(a["username"], platform)
                     ]
                     if len(ready) < len(available):
                         logger.debug(
-                            "Warm-up gate: %d/%d accounts ready for project '%s'",
-                            len(ready), len(available), project,
+                            "Warm-up gate: %d/%d %s accounts ready for '%s'",
+                            len(ready), len(available), platform, project,
                         )
                     available = ready
                     if not available:
                         logger.info(
-                            "No warmed-up reddit accounts available for '%s' "
-                            "— all still in warm-up", project,
+                            "No warmed-up %s accounts available for '%s' "
+                            "— all still in warm-up", platform, project,
                         )
                         return None
 

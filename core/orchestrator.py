@@ -175,6 +175,17 @@ class Orchestrator:
             bot_factory=self._get_reddit_bot,
             alert_cb=self._send_telegram_alert,
         )
+        # X/Twitter warm-up: progressive neutral engagement (likes/follows) so
+        # a cold account builds a natural footprint before it ever promotes.
+        # Graduates on days of warm-up (no karma signal on X).
+        self.warmup_twitter = WarmupScheduler(
+            self.db, self.account_mgr,
+            config_path=f"{config_dir}/warmup.yaml",
+            bot_factory=self._get_twitter_bot,
+            alert_cb=self._send_telegram_alert,
+            platform="twitter",
+            config_key="warmup_twitter",
+        )
         # Track which slugs / geo queries have already fired a "first" alert.
         self._alerted_click_slugs: set = set()
         self._alerted_geo_keys: set = set()
@@ -561,6 +572,13 @@ class Orchestrator:
             self._warmup_cycle_safe, "interval",
             minutes=30, id="warmup",
             next_run_time=datetime.utcnow() + timedelta(minutes=4),
+        )
+        # Nova: X/Twitter account warm-up (only runs if a twitter-enabled
+        # project + X account exist; otherwise it's a cheap no-op).
+        self.scheduler.add_job(
+            self._warmup_twitter_cycle_safe, "interval",
+            minutes=45, id="warmup_twitter",
+            next_run_time=datetime.utcnow() + timedelta(minutes=6),
         )
         # Nova: GEO / AEO AI-citation tracking (paid APIs — runs every 48h)
         geo_interval = self.geo_config.get("geo", {}).get("interval_hours", 48)
@@ -2484,6 +2502,26 @@ class Orchestrator:
                 )
         except Exception as e:
             logger.error("Warm-up cycle error: %s", e)
+
+    def _warmup_twitter_cycle_safe(self):
+        """Run one X/Twitter warm-up cycle. Never raises."""
+        if self._paused:
+            return
+        if not self._check_resources():
+            return
+        # Skip entirely unless some project actually enables twitter.
+        if not any(self._project_twitter_enabled(p) for p in self.projects):
+            return
+        try:
+            stats = self.warmup_twitter.run_cycle()
+            if stats.get("executed") or stats.get("graduated"):
+                logger.info(
+                    "Twitter warm-up cycle: %d actions, %d graduated, %d skipped",
+                    stats.get("executed", 0), stats.get("graduated", 0),
+                    stats.get("skipped", 0),
+                )
+        except Exception as e:
+            logger.error("Twitter warm-up cycle error: %s", e)
 
     def _geo_track_safe(self):
         """Run the GEO / AEO citation tracking job (Phase 1.2). Never raises."""

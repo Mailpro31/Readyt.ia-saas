@@ -50,3 +50,45 @@ warmup:
     - "Same experience here, you're not alone."
     - "Thanks, this actually helped me understand it better."
     - "Great write-up, saving this for later."
+
+
+# =============================================================================
+# X / Twitter Warm-Up Plan
+# =============================================================================
+# X has no karma signal, so an account graduates purely on DAYS of warm-up
+# (require_karma: false). Each warm-up "action" likes a tweet in a neutral,
+# audience-relevant topic and occasionally follows the author — building a
+# natural engagement + follower footprint BEFORE the account ever promotes,
+# which makes later promotion far less likely to be flagged and more effective.
+# Until an X account graduates, account_manager keeps it out of the promo pool.
+warmup_twitter:
+  enabled: true
+  require_karma: false          # graduate on days of warm-up alone (no karma on X)
+
+  # Neutral actions per warm-up day (index = day number). Gentle ramp so a new
+  # account doesn't spike its activity.
+  actions_per_day: [3, 3, 4, 4, 5, 6, 7, 8]
+
+  target_day_count: 8           # ~8 days of engagement before it can promote
+
+  # Chance that a warm-up action also follows the tweet's author (builds a
+  # relevant following graph). Likes are the default action.
+  follow_prob: 0.3
+
+  # Max warm-up actions per orchestrator cycle (the cycle runs every ~45min).
+  max_actions_per_cycle: 3
+
+  # Neutral topics to engage with. A mix of broad interests and Nova's audience
+  # (productivity / writing / accessibility) so the footprint looks like a real
+  # person in the niche — not a bot that only ever talks about one product.
+  neutral_keywords:
+    - "productivity"
+    - "writing tips"
+    - "note taking"
+    - "accessibility"
+    - "ADHD"
+    - "working from home"
+    - "voice typing"
+    - "dictation"
+    - "AI tools"
+    - "indie hacker"

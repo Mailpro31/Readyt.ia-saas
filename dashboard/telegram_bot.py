@@ -166,6 +166,7 @@ class TelegramDashboard:
         self.app.add_handler(CommandHandler("pastecookies", self._cmd_paste_cookies))
         self.app.add_handler(CommandHandler("cookies", self._cmd_cookies))
         self.app.add_handler(CommandHandler("testtwitter", self._cmd_test_twitter))
+        self.app.add_handler(CommandHandler("warmup", self._cmd_warmup))
         self.app.add_handler(CommandHandler("removeaccount", self._cmd_remove_account))
         self.app.add_handler(CommandHandler("llm", self._cmd_llm))
         self.app.add_handler(CommandHandler("hubs", self._cmd_hubs))
@@ -202,6 +203,7 @@ class TelegramDashboard:
             "/llm — Dual-LLM stats (Groq + Ollama)\n\n"
             "-- Accounts --\n"
             "/accounts — List all accounts\n"
+            "/warmup — Account warm-up progress (Reddit + X)\n"
             "/cookies — Session cookie health (valid / expired)\n"
             "/testtwitter — Test X now (connect + scan)\n"
             "/addreddit user pass [projects] — Add Reddit account\n"
@@ -1399,6 +1401,63 @@ class TelegramDashboard:
                 )
             else:
                 self.send_alert_sync(f"🐦 X test: ❌ error: {msg}")
+
+    async def _cmd_warmup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show account warm-up progress per account (Reddit + X)."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._orchestrator:
+            await update.message.reply_text("I'm not connected to the main engine right now.")
+            return
+
+        def _bar(pct: float) -> str:
+            filled = max(0, min(10, int(round(pct / 10))))
+            return "▓" * filled + "░" * (10 - filled) + f" {int(pct)}%"
+
+        schedulers = []
+        if hasattr(self._orchestrator, "warmup"):
+            schedulers.append(("🟠 Reddit", self._orchestrator.warmup))
+        if hasattr(self._orchestrator, "warmup_twitter"):
+            schedulers.append(("🐦 X", self._orchestrator.warmup_twitter))
+
+        lines = ["🔥 WARM-UP PROGRESS\n──────────────"]
+        any_rows = False
+        for label, sched in schedulers:
+            try:
+                rows = sched.progress_view()
+            except Exception:
+                rows = []
+            if not rows:
+                continue
+            lines.append(f"\n{label}:")
+            for r in rows:
+                any_rows = True
+                status = r.get("status")
+                icon = {"warming": "🔥", "ready": "✅", "paused": "⏸"}.get(status, "•")
+                if status == "ready":
+                    lines.append(f"  {icon} @{r['username']} — READY to promote")
+                    continue
+                day = r.get("day_number", 0)
+                target = r.get("target_day_count", 10)
+                metric_name = r.get("metric_name", "karma")
+                metric = r.get("metric", 0)
+                min_metric = r.get("min_metric", 0)
+                metric_str = (
+                    f"{metric_name}: {metric}/{min_metric}"
+                    if min_metric else f"{metric_name}: {metric}"
+                )
+                lines.append(
+                    f"  {icon} @{r['username']} — day {day}/{target}\n"
+                    f"      {_bar(r.get('progress_pct', 0))}\n"
+                    f"      {metric_str} · {r.get('actions_today', 0)} actions today"
+                )
+        if not any_rows:
+            lines.append("\nNo accounts warming up yet.")
+        lines.append(
+            "\nℹ️ An account only starts promoting Nova once it's READY. "
+            "You'll get a 🎓 message the moment each one graduates."
+        )
+        await update.message.reply_text("\n".join(lines))
 
     # ── Reports ──────────────────────────────────────────────────────
 
