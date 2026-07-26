@@ -35,6 +35,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 _applied = False
+_applied_gql = False
 
 # ── OLD format (twikit 2.3.3 default) ────────────────────────────────────
 # home page:  "ondemand.s":"<hash>"      →  hash
@@ -145,4 +146,210 @@ def apply_twikit_patch() -> bool:
         return True
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("Could not apply twikit transaction patch: %s", e)
+        return False
+
+
+# =============================================================================
+# GraphQL query-ID resolution patch
+# =============================================================================
+"""
+Background
+----------
+Every twikit GraphQL call (search, reply/CreateTweet, like, follow, retweet,
+...) hits a URL of the form
+    https://x.com/i/api/graphql/<queryId>/<OperationName>
+where <queryId> is a hash X assigns per operation and rotates on frontend
+deploys — independently of the ondemand.s/transaction-id issue above. twikit
+2.3.3 hardcodes one ID per operation (see twikit/client/gql.py Endpoint.*). If
+X rotated an ID and twikit's copy is stale, X returns a plain 404 for that
+call — confirmed live: ALL 8 search terms failed with
+"NotFound: status: 404, message: \"\"" even though authentication itself
+succeeded (a *different* symptom than the transaction-id break, which fails
+at login, not per-operation).
+
+What this does
+---------------
+Wraps GQLClient.gql_get / gql_post so that, on a 404 NotFound, it:
+  1. Discovers the CURRENT queryId for that operation by fetching X's live
+     webpack bundles (linked from the home page) and scanning them for
+     "<queryId>"/"<OperationName>" pairs (several known minified encodings).
+  2. Retries the call once with the fresh ID.
+  3. Caches discovered IDs (process lifetime) so later calls to the same or
+     other operations reuse the map instead of re-fetching bundles each time.
+If discovery fails, the original error is raised unchanged — no worse than
+before the patch.
+"""
+import asyncio
+import time
+
+_gql_id_cache: dict = {}
+_gql_discovery_lock = None  # created lazily (needs a running loop)
+_gql_last_discovery = 0.0
+_GQL_DISCOVERY_MIN_INTERVAL = 300  # don't re-scan bundles more than every 5min
+
+_BUNDLE_URL_RE = re.compile(
+    r"""src=["'](https://abs\.twimg\.com/responsive-web/[^"']+?\.js)["']"""
+)
+# "queryId":"XXXX","operationName":"Foo"  (or reversed order)
+_OPID_PATTERNS = [
+    re.compile(r'"queryId"\s*:\s*"([\w-]{15,})"\s*,\s*"operationName"\s*:\s*"(\w+)"'),
+    re.compile(r'"operationName"\s*:\s*"(\w+)"\s*,\s*"queryId"\s*:\s*"([\w-]{15,})"'),
+    # webpack object-literal form: OperationName:{queryId:"XXXX"
+    re.compile(r'(\w+)\s*:\s*\{\s*queryId\s*:\s*"([\w-]{15,})"'),
+    re.compile(r'queryId\s*:\s*"([\w-]{15,})"\s*,\s*operationName\s*:\s*"(\w+)"'),
+]
+
+
+def _get_lock() -> "asyncio.Lock":
+    global _gql_discovery_lock
+    if _gql_discovery_lock is None:
+        _gql_discovery_lock = asyncio.Lock()
+    return _gql_discovery_lock
+
+
+async def _discover_gql_query_ids(http, headers: dict) -> dict:
+    """Fetch X's live JS bundles and extract operationName -> queryId pairs."""
+    found: dict = {}
+    try:
+        home = await http.get("https://x.com/", headers=headers, timeout=30)
+        page = home.text
+    except Exception as e:
+        logger.warning("twikit_patch: couldn't fetch x.com home for gql discovery: %s", e)
+        return found
+
+    bundle_urls = list(dict.fromkeys(_BUNDLE_URL_RE.findall(page)))[:20]
+    if not bundle_urls:
+        logger.warning("twikit_patch: no JS bundle URLs found on x.com home page")
+        return found
+
+    total_bytes = 0
+    for url in bundle_urls:
+        if total_bytes > 25_000_000:  # safety cap ~25MB total
+            break
+        try:
+            resp = await http.get(url, headers=headers, timeout=30)
+            text = resp.text
+            total_bytes += len(text)
+        except Exception as e:
+            logger.debug("twikit_patch: bundle fetch failed for %s: %s", url, e)
+            continue
+
+        for pattern in _OPID_PATTERNS:
+            for m in pattern.finditer(text):
+                g1, g2 = m.group(1), m.group(2)
+                # Two possible group orders depending on pattern; the queryId
+                # is the long hash-like token, operationName is a plain word.
+                if len(g1) > len(g2) and not g1.isalpha():
+                    query_id, op_name = g1, g2
+                else:
+                    op_name, query_id = g1, g2
+                found.setdefault(op_name, query_id)
+
+    logger.info(
+        "twikit_patch: gql discovery scanned %d bundle(s), found %d operation IDs",
+        len(bundle_urls), len(found),
+    )
+    return found
+
+
+async def _resolve_query_id(gql_client, operation_name: str, hardcoded_id: str,
+                             force: bool = False) -> str:
+    """Return the best-known queryId for an operation, discovering if needed."""
+    global _gql_last_discovery
+    if not force and operation_name in _gql_id_cache:
+        return _gql_id_cache[operation_name]
+
+    now = time.time()
+    async with _get_lock():
+        # Re-check after acquiring the lock (another call may have just discovered).
+        if not force and operation_name in _gql_id_cache:
+            return _gql_id_cache[operation_name]
+        if not force and (now - _gql_last_discovery) < _GQL_DISCOVERY_MIN_INTERVAL:
+            return hardcoded_id
+        _gql_last_discovery = now
+        base = gql_client.base
+        try:
+            headers = base._base_headers
+        except Exception:
+            headers = {}
+        discovered = await _discover_gql_query_ids(base.http, headers)
+        _gql_id_cache.update(discovered)
+
+    return _gql_id_cache.get(operation_name, hardcoded_id)
+
+
+def _split_gql_url(url: str):
+    """Return (prefix, hardcoded_query_id, operation_name) from a twikit gql URL."""
+    parts = url.rsplit("/", 2)
+    if len(parts) != 3:
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+async def _fresh_url(gql_client, url: str, force: bool = False) -> str:
+    split = _split_gql_url(url)
+    if not split:
+        return url
+    prefix, hardcoded_id, op_name = split
+    fresh_id = await _resolve_query_id(gql_client, op_name, hardcoded_id, force=force)
+    if fresh_id and fresh_id != hardcoded_id:
+        return f"{prefix}/{fresh_id}/{op_name}"
+    return url
+
+
+def apply_twikit_gql_patch() -> bool:
+    """Monkeypatch GQLClient.gql_get/gql_post to self-heal stale query IDs.
+
+    Safe and idempotent; never raises. Covers search AND write operations
+    (reply/CreateTweet, like, follow, retweet, ...) since they all go through
+    the same two low-level methods.
+    """
+    global _applied_gql
+    if _applied_gql:
+        return True
+    try:
+        from twikit.client.gql import GQLClient
+        orig_get = GQLClient.gql_get
+        orig_post = GQLClient.gql_post
+
+        async def _patched_get(self, url, variables, features=None, headers=None,
+                                extra_params=None, **kwargs):
+            fresh = await _fresh_url(self, url)
+            try:
+                return await orig_get(self, fresh, variables, features, headers, extra_params, **kwargs)
+            except Exception as e:
+                if type(e).__name__ != "NotFound":
+                    raise
+                logger.warning(
+                    "twikit_patch: gql GET %s got 404, rediscovering query "
+                    "IDs and retrying once", url.rsplit("/", 1)[-1],
+                )
+                retry_url = await _fresh_url(self, url, force=True)
+                return await orig_get(self, retry_url, variables, features, headers, extra_params, **kwargs)
+
+        async def _patched_post(self, url, variables, features=None, headers=None,
+                                 extra_data=None, **kwargs):
+            fresh = await _fresh_url(self, url)
+            try:
+                return await orig_post(self, fresh, variables, features, headers, extra_data, **kwargs)
+            except Exception as e:
+                if type(e).__name__ != "NotFound":
+                    raise
+                logger.warning(
+                    "twikit_patch: gql POST %s got 404, rediscovering query "
+                    "IDs and retrying once", url.rsplit("/", 1)[-1],
+                )
+                retry_url = await _fresh_url(self, url, force=True)
+                return await orig_post(self, retry_url, variables, features, headers, extra_data, **kwargs)
+
+        GQLClient.gql_get = _patched_get
+        GQLClient.gql_post = _patched_post
+        _applied_gql = True
+        logger.info(
+            "Applied twikit GraphQL query-ID self-healing patch "
+            "(auto-discovers fresh operation IDs on 404, covers search + writes)"
+        )
+        return True
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not apply twikit gql-id patch: %s", e)
         return False

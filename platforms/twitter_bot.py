@@ -12,7 +12,7 @@ from typing import List, Dict, Optional
 from twikit import Client as TwikitClient
 
 from platforms.base_platform import BasePlatform
-from platforms.twikit_patch import apply_twikit_patch
+from platforms.twikit_patch import apply_twikit_patch, apply_twikit_gql_patch
 from core.database import Database
 from core.content_gen import ContentGenerator
 
@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # ondemand.s bundle ~2026-03-18; upstream fix d60/twikit#411 unreleased).
 # Applied once at import; safe/idempotent and never raises.
 apply_twikit_patch()
+# Fix twikit's hardcoded, easily-stale GraphQL queryIds (search, replies,
+# likes, follows, ...): self-heals by discovering the current ID from X's
+# live JS bundles when a call 404s. Applied once at import; safe/idempotent.
+apply_twikit_gql_patch()
 
 
 import threading
