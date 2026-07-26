@@ -73,7 +73,9 @@ def _run_async_safe(coro):
         _twitter_loop = None
         loop = _get_twitter_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=120)
+    # A single scan cycle pages through several search terms with human-like
+    # pauses, so allow generous headroom before giving up.
+    return future.result(timeout=300)
 
 
 class TwitterBot(BasePlatform):
@@ -107,6 +109,7 @@ class TwitterBot(BasePlatform):
         self._authenticated = False
         self._loop_gen = 0  # Track which loop generation client was created on
         self._keyword_failures: Dict[str, int] = {}  # keyword -> consecutive 404 count
+        self._term_rotation = 0  # round-robin index across scan cycles
         self._proxy = proxy  # HTTP proxy for Cloudflare bypass
 
         # Ensure cookies directory exists
@@ -259,8 +262,18 @@ class TwitterBot(BasePlatform):
         keywords = list(twitter_config.get("keywords", []) or [])
         hashtags = list(twitter_config.get("hashtags", []) or [])
         # Search keywords + hashtags; dedupe while preserving order.
-        search_terms = list(dict.fromkeys(keywords + hashtags))
-        max_pages = max(1, int(twitter_config.get("scan_pages", 3)))
+        all_terms = list(dict.fromkeys(keywords + hashtags))
+        max_pages = max(1, int(twitter_config.get("scan_pages", 2)))
+        # Only scan a slice of terms per cycle (round-robin) so a single scan
+        # always finishes well within the async timeout; full coverage is
+        # reached across successive cycles.
+        per_cycle = max(1, int(twitter_config.get("scan_terms_per_cycle", 8)))
+        if len(all_terms) > per_cycle:
+            start = self._term_rotation % len(all_terms)
+            self._term_rotation = (start + per_cycle) % len(all_terms)
+            search_terms = (all_terms + all_terms)[start:start + per_cycle]
+        else:
+            search_terms = all_terms
         project_name = project.get("project", {}).get("name", "unknown")
         seen_ids = set()
 
@@ -348,7 +361,7 @@ class TwitterBot(BasePlatform):
                         break
                     _process_tweets(tweets, term)
                     page += 1
-                    await asyncio.sleep(random.uniform(1, 3))
+                    await asyncio.sleep(random.uniform(0.8, 2.0))
 
             except Exception as e:
                 err_str = str(e)
@@ -374,7 +387,7 @@ class TwitterBot(BasePlatform):
                 if "404" in err_str or "not found" in err_str.lower():
                     self._keyword_failures[term] = self._keyword_failures.get(term, 0) + 1
 
-            await asyncio.sleep(random.uniform(3, 8))
+            await asyncio.sleep(random.uniform(1.5, 4.0))
 
         opportunities.sort(
             key=lambda x: x.get("relevance_score", 0), reverse=True

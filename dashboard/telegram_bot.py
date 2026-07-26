@@ -195,6 +195,7 @@ class TelegramDashboard:
         self.app.add_handler(CommandHandler("cookies", self._cmd_cookies))
         self.app.add_handler(CommandHandler("testtwitter", self._cmd_test_twitter))
         self.app.add_handler(CommandHandler("warmup", self._cmd_warmup))
+        self.app.add_handler(CommandHandler("skipwarmup", self._cmd_skip_warmup))
         self.app.add_handler(CommandHandler("removeaccount", self._cmd_remove_account))
         self.app.add_handler(CommandHandler("llm", self._cmd_llm))
         self.app.add_handler(CommandHandler("hubs", self._cmd_hubs))
@@ -330,7 +331,9 @@ class TelegramDashboard:
 
         stats = self.db.get_stats_summary(hours=24)
 
-        text = "Here's my last 24 hours:\n\n"
+        text = ("📈 24 DERNIÈRES HEURES\n──────────────\n\n"
+                if self._lang == "fr" else
+                "📈 LAST 24 HOURS\n──────────────\n\n")
 
         actions = stats.get("actions", {})
         if actions:
@@ -390,7 +393,9 @@ class TelegramDashboard:
             engine = LearningEngine(self.db)
             insights = engine.get_insights()
 
-            text = "Here's what I've figured out so far:\n\n"
+            text = ("💡 CE QUE J'AI APPRIS\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "💡 WHAT I'VE LEARNED\n──────────────\n\n")
 
             top_subs = insights.get("top_subreddits", [])
             if top_subs:
@@ -646,7 +651,7 @@ class TelegramDashboard:
         if not self._is_admin(update.effective_user.id):
             return
         if not self._orchestrator:
-            await update.message.reply_text("Not connected to the engine.")
+            await update.message.reply_text(self.t("not_connected"))
             return
         if self.paused:
             await update.message.reply_text(self.t("post_paused"))
@@ -716,7 +721,9 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Subreddit Intelligence\n\n"
+            text = ("🧠 INTELLIGENCE SUBREDDITS\n──────────────\n"
+                    if self._lang == "fr" else
+                    "🧠 SUBREDDIT INTELLIGENCE\n──────────────\n")
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
@@ -724,7 +731,7 @@ class TelegramDashboard:
                         proj_name, limit=10
                     )
                     if top:
-                        text += f"--- {proj_name} ---\n"
+                        text += f"📁 {proj_name}\n"
                         for i, s in enumerate(top, 1):
                             score = s.get("opportunity_score", 0)
                             subs = s.get("subscribers", 0)
@@ -735,9 +742,9 @@ class TelegramDashboard:
                             )
                         text += "\n"
                     else:
-                        text += f"--- {proj_name} ---\nNo intel yet. Run /scan first.\n\n"
+                        text += f"📁 {proj_name}\nNo intel yet. Run /scan first.\n\n"
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load intel: {e}"
 
@@ -748,13 +755,15 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Community Presence\n\n"
+            text = ("🏘 PRÉSENCE COMMUNAUTÉ\n──────────────\n"
+                    if self._lang == "fr" else
+                    "🏘 COMMUNITY PRESENCE\n──────────────\n")
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
                     presences = self.db.get_community_presence(proj_name)
                     if presences:
-                        text += f"--- {proj_name} ---\n"
+                        text += f"📁 {proj_name}\n"
                         for p in presences[:15]:
                             stage = p.get("stage", "new")
                             warmth = p.get("warmth_score", 0)
@@ -772,9 +781,9 @@ class TelegramDashboard:
                             )
                         text += "\n"
                     else:
-                        text += f"--- {proj_name} ---\nNo presence data yet.\n\n"
+                        text += f"📁 {proj_name}\nNo presence data yet.\n\n"
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load presence: {e}"
 
@@ -836,20 +845,22 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Relationships\n\n"
+            text = ("🤝 RELATIONS\n──────────────\n"
+                    if self._lang == "fr" else
+                    "🤝 RELATIONSHIPS\n──────────────\n")
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
                     stats = self.db.get_relationship_stats(proj_name)
                     if stats:
-                        text += f"--- {proj_name} ---\n"
+                        text += f"📁 {proj_name}\n"
                         for stage in ["noticed", "engaged", "warm", "friend", "advocate"]:
                             count = stats.get(stage, 0)
                             if count > 0:
                                 text += f"  {stage.capitalize()}: {count}\n"
                         text += "\n"
                     else:
-                        text += f"--- {proj_name} ---\nNo relationships yet.\n\n"
+                        text += f"📁 {proj_name}\nNo relationships yet.\n\n"
 
                 # DMs sent today
                 for platform in ("reddit", "twitter"):
@@ -860,7 +871,7 @@ class TelegramDashboard:
                             plat = "Reddit" if platform == "reddit" else "X"
                             text += f"{plat} @{acc['username']}: {count} DMs today\n"
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load relationships: {e}"
 
@@ -877,7 +888,9 @@ class TelegramDashboard:
                 await update.message.reply_text("No conversations yet.")
                 return
 
-            text = "Recent conversations:\n\n"
+            text = ("💬 CONVERSATIONS RÉCENTES\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "💬 RECENT CONVERSATIONS\n──────────────\n\n")
             for conv in recent:
                 plat = "Reddit" if conv["platform"] == "reddit" else "X"
                 direction = "->" if conv["direction"] == "sent" else "<-"
@@ -902,7 +915,7 @@ class TelegramDashboard:
 
         try:
             if not self._orchestrator:
-                await update.message.reply_text("Not connected to the engine.")
+                await update.message.reply_text(self.t("not_connected"))
                 return
 
             hubs = self._orchestrator.hub_manager.get_hubs()
@@ -1006,7 +1019,9 @@ class TelegramDashboard:
                 )
                 return
 
-            text = "Recent Decisions (last 2h):\n\n"
+            text = ("🛠 DÉCISIONS RÉCENTES (2h)\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "🛠 RECENT DECISIONS (last 2h)\n──────────────\n\n")
             for d in decisions:
                 ts = d.get("timestamp", "")[-8:]  # HH:MM:SS
                 dtype = d.get("decision_type", "?")
@@ -1052,7 +1067,7 @@ class TelegramDashboard:
 
         try:
             if not self._orchestrator:
-                await update.message.reply_text("Not connected to the engine.")
+                await update.message.reply_text(self.t("not_connected"))
                 return
 
             stats = self._orchestrator.llm.get_stats()
@@ -1060,7 +1075,9 @@ class TelegramDashboard:
             groq_rate = stats.get("groq_rate", {})
             routing = stats.get("routing", {})
 
-            text = "Dual-LLM System\n\n"
+            text = ("🤖 SYSTÈME IA (Groq + Gemini)\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "🤖 AI SYSTEM (Groq + Gemini)\n──────────────\n\n")
 
             # Routing info
             creative = routing.get("creative", [])
@@ -1350,6 +1367,31 @@ class TelegramDashboard:
             await update.message.reply_text(result)
         except Exception as e:
             await update.message.reply_text(f"Failed: {e}")
+
+    async def _cmd_skip_warmup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Skip an account's warm-up so it can promote immediately.
+
+        Usage: /skipwarmup <platform> <username>
+        """
+        if not self._is_admin(update.effective_user.id):
+            return
+        args = context.args or []
+        if len(args) < 2:
+            await update.message.reply_text(self.t("skip_usage"))
+            return
+        platform = args[0].lower()
+        if platform == "x":
+            platform = "twitter"
+        if platform not in ("reddit", "twitter"):
+            await update.message.reply_text(self.t("skip_unknown"))
+            return
+        username = args[1].lstrip("@")
+        # Mark the warm-up row ready (create it first if it doesn't exist).
+        self.db.upsert_warmup(username, platform)
+        self.db.set_warmup_status(username, platform, "ready")
+        await update.message.reply_text(
+            self.t("skip_done", user=username, platform=platform)
+        )
 
     async def _cmd_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show cookie/session status per account (which key cookies are present)."""

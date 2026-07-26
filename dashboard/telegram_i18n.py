@@ -47,6 +47,7 @@ _CATALOG: List[Tuple[str, str, str, str]] = [
     ("accounts",     "accounts", "List all accounts",              "Lister tous les comptes"),
     ("cookies",      "accounts", "Session cookie health",          "Santé des cookies de session"),
     ("testtwitter",  "accounts", "Test X now (connect + scan)",    "Tester X (connexion + scan)"),
+    ("skipwarmup",   "accounts", "Skip warm-up (promote now)",     "Passer le warm-up (promo directe)"),
     ("addreddit",    "accounts", "Add a Reddit account",           "Ajouter un compte Reddit"),
     ("addtwitter",   "accounts", "Add an X account",               "Ajouter un compte X"),
     ("pastecookies", "accounts", "Paste session cookies",          "Coller des cookies de session"),
@@ -206,6 +207,18 @@ _L: Dict[str, Dict[str, str]] = {
                               "I'll send the result in a moment.",
                         "fr": "🐦 Test de X — connexion et vrai scan en cours…\n"
                               "Je t'envoie le résultat dans un instant."},
+
+    # /skipwarmup
+    "skip_usage":      {"en": "Usage: /skipwarmup <platform> <username>\n"
+                              "Example: /skipwarmup twitter ArchiTekte_",
+                        "fr": "Usage : /skipwarmup <plateforme> <pseudo>\n"
+                              "Exemple : /skipwarmup twitter ArchiTekte_"},
+    "skip_unknown":    {"en": "Unknown platform. Use reddit or twitter.",
+                        "fr": "Plateforme inconnue. Utilise reddit ou twitter."},
+    "skip_done":       {"en": "✅ @{user} ({platform}) marked READY — warm-up skipped. "
+                              "It can start promoting Nova now.",
+                        "fr": "✅ @{user} ({platform}) marqué PRÊT — warm-up sauté. "
+                              "Il peut promouvoir Nova dès maintenant."},
 }
 
 

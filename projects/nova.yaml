@@ -159,9 +159,11 @@ reddit:
 # residential IP (e.g. home Raspberry Pi) is much more reliable.
 twitter:
   enabled: true
-  # scan_pages: how many result pages to page through per term (more = wider
-  # reach per scan). Deduped across terms. 3 pages ≈ up to ~60 tweets/term.
-  scan_pages: 3
+  # scan_pages: result pages paged through per term. scan_terms_per_cycle:
+  # how many terms to scan each cycle (round-robin across cycles so one scan
+  # always finishes fast; full keyword coverage is reached over time).
+  scan_pages: 2
+  scan_terms_per_cycle: 8
   keywords:
     # High-volume intent terms (broad reach — relevance is handled by scoring,
     # so off-topic tweets score low and won't be replied to)
