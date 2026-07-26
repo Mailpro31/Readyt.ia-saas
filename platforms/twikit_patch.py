@@ -473,6 +473,13 @@ def _make_patched_tweet_from_data():
                      for k, v in ctx.items()},
         )
 
+    def _diag_exc(reason: str, **ctx):
+        global _parse_diag_logged
+        if _parse_diag_logged:
+            return
+        _parse_diag_logged = True
+        logger.warning("twikit_patch: %s. Context: %s", reason, ctx, exc_info=True)
+
     def _patched(client, data):
         tweet_data, how = _extract_tweet_data(data)
         if not tweet_data:
@@ -506,16 +513,14 @@ def _make_patched_tweet_from_data():
         except Exception as e:
             # Don't let this vanish into client.py's broad `except KeyError:
             # tweet = None` — log exactly what failed, once, with a traceback.
-            if not _parse_diag_logged:
-                _parse_diag_logged = True
-                logger.warning(
-                    "twikit_patch: Tweet/User construction failed: %s: %s "
-                    "(legacy_keys=%s, user_data_keys=%s)",
-                    type(e).__name__, e,
-                    list((tweet_data.get("legacy") or {}).keys())[:20],
-                    list(user_data.keys())[:20] if isinstance(user_data, dict) else user_data,
-                    exc_info=True,
-                )
+            _diag_exc(
+                f"Tweet/User construction failed: {type(e).__name__}: {e}",
+                legacy_keys=list((tweet_data.get("legacy") or {}).keys())[:20],
+                user_data_keys=(
+                    list(user_data.keys())[:20]
+                    if isinstance(user_data, dict) else user_data
+                ),
+            )
             raise
 
     return _patched
