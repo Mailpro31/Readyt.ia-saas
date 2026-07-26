@@ -187,8 +187,12 @@ _gql_discovery_lock = None  # created lazily (needs a running loop)
 _gql_last_discovery = 0.0
 _GQL_DISCOVERY_MIN_INTERVAL = 300  # don't re-scan bundles more than every 5min
 
+# Bare-URL match (no assumption about surrounding <script>/<link> markup or
+# quote style) — X's bundle references may appear in <script src>, <link
+# href> (modulepreload), or inline JSON/JS. This just looks for the URL
+# string itself, which is far more robust to markup changes.
 _BUNDLE_URL_RE = re.compile(
-    r"""src=["'](https://abs\.twimg\.com/responsive-web/[^"']+?\.js)["']"""
+    r"""https://abs\.twimg\.com/responsive-web/[^\s"'<>\\]+?\.js"""
 )
 # "queryId":"XXXX","operationName":"Foo"  (or reversed order)
 _OPID_PATTERNS = [
@@ -207,43 +211,66 @@ def _get_lock() -> "asyncio.Lock":
     return _gql_discovery_lock
 
 
-async def _discover_gql_query_ids(http, headers: dict) -> dict:
-    """Fetch X's live JS bundles and extract operationName -> queryId pairs."""
+_DISCOVERY_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+async def _discover_gql_query_ids(*_args, **_kwargs) -> dict:
+    """Fetch X's live JS bundles and extract operationName -> queryId pairs.
+
+    Uses a dedicated, cookie-free HTTP client (never the account's
+    authenticated session): reusing the logged-in session to fetch the public
+    home page can make X set a second guest cookie alongside the real one
+    (e.g. a duplicate 'twid'), corrupting the account's cookie jar
+    (httpx.CookieConflict on the next real request). Discovery only reads
+    public JS, so it doesn't need — and must not touch — the account's cookies.
+    """
     found: dict = {}
     try:
-        home = await http.get("https://x.com/", headers=headers, timeout=30)
-        page = home.text
+        import httpx
+    except Exception as e:  # pragma: no cover - httpx is a twikit dependency
+        logger.warning("twikit_patch: httpx unavailable for gql discovery: %s", e)
+        return found
+
+    headers = {"User-Agent": _DISCOVERY_UA, "Accept-Language": "en-US,en;q=0.9"}
+    try:
+        async with httpx.AsyncClient() as disco:
+            home = await disco.get("https://x.com/", headers=headers, timeout=30)
+            page = home.text
+
+            bundle_urls = list(dict.fromkeys(_BUNDLE_URL_RE.findall(page)))[:20]
+            if not bundle_urls:
+                logger.warning("twikit_patch: no JS bundle URLs found on x.com home page")
+                return found
+
+            total_bytes = 0
+            for url in bundle_urls:
+                if total_bytes > 25_000_000:  # safety cap ~25MB total
+                    break
+                try:
+                    resp = await disco.get(url, headers=headers, timeout=30)
+                    text = resp.text
+                    total_bytes += len(text)
+                except Exception as e:
+                    logger.debug("twikit_patch: bundle fetch failed for %s: %s", url, e)
+                    continue
+
+                for pattern in _OPID_PATTERNS:
+                    for m in pattern.finditer(text):
+                        g1, g2 = m.group(1), m.group(2)
+                        # Two possible group orders depending on pattern; the
+                        # queryId is the long hash-like token, operationName
+                        # is a plain word.
+                        if len(g1) > len(g2) and not g1.isalpha():
+                            query_id, op_name = g1, g2
+                        else:
+                            op_name, query_id = g1, g2
+                        found.setdefault(op_name, query_id)
     except Exception as e:
-        logger.warning("twikit_patch: couldn't fetch x.com home for gql discovery: %s", e)
+        logger.warning("twikit_patch: gql discovery failed: %s", e)
         return found
-
-    bundle_urls = list(dict.fromkeys(_BUNDLE_URL_RE.findall(page)))[:20]
-    if not bundle_urls:
-        logger.warning("twikit_patch: no JS bundle URLs found on x.com home page")
-        return found
-
-    total_bytes = 0
-    for url in bundle_urls:
-        if total_bytes > 25_000_000:  # safety cap ~25MB total
-            break
-        try:
-            resp = await http.get(url, headers=headers, timeout=30)
-            text = resp.text
-            total_bytes += len(text)
-        except Exception as e:
-            logger.debug("twikit_patch: bundle fetch failed for %s: %s", url, e)
-            continue
-
-        for pattern in _OPID_PATTERNS:
-            for m in pattern.finditer(text):
-                g1, g2 = m.group(1), m.group(2)
-                # Two possible group orders depending on pattern; the queryId
-                # is the long hash-like token, operationName is a plain word.
-                if len(g1) > len(g2) and not g1.isalpha():
-                    query_id, op_name = g1, g2
-                else:
-                    op_name, query_id = g1, g2
-                found.setdefault(op_name, query_id)
 
     logger.info(
         "twikit_patch: gql discovery scanned %d bundle(s), found %d operation IDs",
@@ -267,12 +294,7 @@ async def _resolve_query_id(gql_client, operation_name: str, hardcoded_id: str,
         if not force and (now - _gql_last_discovery) < _GQL_DISCOVERY_MIN_INTERVAL:
             return hardcoded_id
         _gql_last_discovery = now
-        base = gql_client.base
-        try:
-            headers = base._base_headers
-        except Exception:
-            headers = {}
-        discovered = await _discover_gql_query_ids(base.http, headers)
+        discovered = await _discover_gql_query_ids()
         _gql_id_cache.update(discovered)
 
     return _gql_id_cache.get(operation_name, hardcoded_id)
