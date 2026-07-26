@@ -12,7 +12,11 @@ from typing import List, Dict, Optional
 from twikit import Client as TwikitClient
 
 from platforms.base_platform import BasePlatform
-from platforms.twikit_patch import apply_twikit_patch, apply_twikit_gql_patch
+from platforms.twikit_patch import (
+    apply_twikit_patch,
+    apply_twikit_gql_patch,
+    apply_twikit_tweet_parse_patch,
+)
 from core.database import Database
 from core.content_gen import ContentGenerator
 
@@ -26,6 +30,10 @@ apply_twikit_patch()
 # likes, follows, ...): self-heals by discovering the current ID from X's
 # live JS bundles when a call 404s. Applied once at import; safe/idempotent.
 apply_twikit_gql_patch()
+# Fix twikit silently parsing 0 tweets out of a non-empty search response
+# (X added a new timeline-entry field that broke twikit's generic "first dict
+# with a 'result' key" search). Applied once at import; safe/idempotent.
+apply_twikit_tweet_parse_patch()
 
 
 import threading

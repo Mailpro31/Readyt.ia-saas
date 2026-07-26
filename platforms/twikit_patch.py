@@ -375,3 +375,128 @@ def apply_twikit_gql_patch() -> bool:
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("Could not apply twikit gql-id patch: %s", e)
         return False
+
+
+# =============================================================================
+# Tweet-entry parsing patch
+# =============================================================================
+"""
+Background
+----------
+Live diagnostic (scripts/twitter_search_debug.py) showed the RAW
+SearchTimeline response is fine — 22 entries, 10 of them real tweets — but
+twikit's parsed result was 0. twikit.tweet.tweet_from_data() locates each
+tweet's data with a generic recursive search: "the first dict anywhere in
+this entry that has a key called 'result'" (utils.find_dict(data, 'result',
+find_one=True)). That is fragile: if X added ANY new sibling field to a
+timeline entry that also happens to contain a 'result' key (common in
+GraphQL — e.g. ad/metadata wrappers) and it appears earlier in iteration
+order than the real tweet_results.result, find_dict grabs the wrong object,
+the following 'core'/'legacy' checks fail, and the function silently returns
+None for every tweet — no exception, no error, just an empty scan.
+
+What this does
+---------------
+Monkeypatches tweet_from_data with a version that first navigates the KNOWN,
+explicit path for a modern timeline entry
+(content.itemContent.tweet_results.result) instead of the generic search,
+falling back to the original generic search if that explicit path isn't
+present (older/alternate entry shapes, e.g. quote tweets or profile timelines
+still handled the old way). On total failure it logs a one-time diagnostic
+of the entry's top-level keys so the real shape is visible if this guess
+also needs tuning.
+
+Must patch `twikit.client.client.tweet_from_data` (NOT `twikit.tweet.
+tweet_from_data`): client.py does `from ..tweet import tweet_from_data`,
+which binds its own local name — patching the original module has no effect
+on calls made from client.py.
+"""
+_applied_parse = False
+_parse_diag_logged = False
+
+
+def _extract_tweet_data(data: dict):
+    """Locate a tweet's result dict within a timeline entry.
+
+    Tries the explicit modern path first, falls back to the original
+    generic recursive search (twikit's default behaviour).
+    """
+    tweet_data = None
+    try:
+        tweet_data = (
+            (data.get("content") or {})
+            .get("itemContent", {})
+            .get("tweet_results", {})
+            .get("result")
+        )
+    except AttributeError:
+        tweet_data = None
+
+    how = "explicit-path"
+    if not tweet_data:
+        try:
+            from twikit.utils import find_dict
+            found = find_dict(data, "result", find_one=True)
+            tweet_data = found[0] if found else None
+            how = "generic-search"
+        except Exception:
+            tweet_data = None
+            how = "none"
+
+    return tweet_data, how
+
+
+def _make_patched_tweet_from_data():
+    from twikit.tweet import Tweet
+    from twikit.user import User
+
+    def _patched(client, data):
+        global _parse_diag_logged
+        tweet_data, how = _extract_tweet_data(data)
+        if not tweet_data:
+            return None
+
+        if tweet_data.get("__typename") == "TweetTombstone":
+            return None
+        if "tweet" in tweet_data:
+            tweet_data = tweet_data["tweet"]
+
+        if "core" not in tweet_data or "legacy" not in tweet_data:
+            if not _parse_diag_logged:
+                _parse_diag_logged = True
+                logger.warning(
+                    "twikit_patch: tweet parse failed via %s — entry resolved "
+                    "to a dict with keys %s (missing 'core' or 'legacy'). "
+                    "X's tweet-result shape may have changed further.",
+                    how, list(tweet_data.keys())[:15],
+                )
+            return None
+        if "result" not in tweet_data.get("core", {}).get("user_results", {}):
+            return None
+
+        user_data = tweet_data["core"]["user_results"]["result"]
+        return Tweet(client, tweet_data, User(client, user_data))
+
+    return _patched
+
+
+def apply_twikit_tweet_parse_patch() -> bool:
+    """Monkeypatch tweet_from_data (as imported into client.py) to fix
+    silent 0-results parsing. Safe and idempotent; never raises.
+    """
+    global _applied_parse
+    if _applied_parse:
+        return True
+    try:
+        from twikit.client import client as _client_mod
+        patched = _make_patched_tweet_from_data()
+        _client_mod.tweet_from_data = patched
+        _applied_parse = True
+        logger.info(
+            "Applied twikit tweet-entry parsing patch "
+            "(fixes silent 0-results when X adds new entry fields)"
+        )
+        return True
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not apply twikit tweet-parse patch: %s", e)
+        return False
