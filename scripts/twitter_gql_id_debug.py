@@ -12,12 +12,14 @@ Usage:
     python3 scripts/twitter_gql_id_debug.py
 """
 import asyncio
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
+import yaml
 
 from platforms.twikit_patch import _BUNDLE_URL_RE, _OPID_PATTERNS
 
@@ -25,8 +27,37 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
+def _load_account_cookies() -> dict:
+    """Best-effort: load the first configured X account's cookies.
+
+    An ANONYMOUS request to x.com gets a stripped-down logged-out landing
+    page that doesn't reference the full app bundle set (confirmed live: 0
+    bundle URLs found that way) — so discovery needs to look like a logged-in
+    browser. This is a READ-ONLY copy used to seed a disposable httpx client;
+    it never touches the account's real session.
+    """
+    try:
+        with open("config/twitter_accounts.yaml") as f:
+            accounts = (yaml.safe_load(f) or {}).get("accounts", [])
+        for acc in accounts:
+            cf = acc.get("cookies_file", "")
+            if cf and os.path.exists(cf):
+                with open(cf) as f:
+                    raw = json.load(f)
+                if isinstance(raw, list):
+                    return {c["name"]: c["value"] for c in raw if "name" in c}
+                if isinstance(raw, dict):
+                    return raw
+    except Exception as e:
+        print(f"(couldn't load account cookies, continuing anonymously: {e})")
+    return {}
+
+
 async def main():
-    async with httpx.AsyncClient() as http:
+    seed_cookies = _load_account_cookies()
+    print(f"Seeding request with {len(seed_cookies)} account cookie(s) "
+          f"(read-only copy — real session untouched)\n")
+    async with httpx.AsyncClient(cookies=seed_cookies) as http:
         print("== Fetching https://x.com/ ==")
         headers = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}
         try:

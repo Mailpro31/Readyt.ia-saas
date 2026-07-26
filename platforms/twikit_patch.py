@@ -217,15 +217,21 @@ _DISCOVERY_UA = (
 )
 
 
-async def _discover_gql_query_ids(*_args, **_kwargs) -> dict:
+async def _discover_gql_query_ids(seed_cookies: dict | None = None) -> dict:
     """Fetch X's live JS bundles and extract operationName -> queryId pairs.
 
-    Uses a dedicated, cookie-free HTTP client (never the account's
-    authenticated session): reusing the logged-in session to fetch the public
-    home page can make X set a second guest cookie alongside the real one
-    (e.g. a duplicate 'twid'), corrupting the account's cookie jar
-    (httpx.CookieConflict on the next real request). Discovery only reads
-    public JS, so it doesn't need — and must not touch — the account's cookies.
+    Uses a DEDICATED HTTP client, never the account's live session object —
+    reusing the logged-in session directly to fetch the public home page can
+    make X set a second guest cookie alongside the real one (e.g. a duplicate
+    'twid'), corrupting the account's cookie jar (httpx.CookieConflict on the
+    next real request).
+
+    However, a fully anonymous (cookie-less) request gets X's stripped-down
+    logged-out landing page, which doesn't reference the full app bundle set
+    (confirmed live: 0 bundle URLs found that way) — so we seed this
+    THROWAWAY client with a read-only COPY of the account's cookies to see
+    the real logged-in app shell. Any Set-Cookie the server sends back only
+    mutates this disposable client's jar, never the account's actual session.
     """
     found: dict = {}
     try:
@@ -236,7 +242,7 @@ async def _discover_gql_query_ids(*_args, **_kwargs) -> dict:
 
     headers = {"User-Agent": _DISCOVERY_UA, "Accept-Language": "en-US,en;q=0.9"}
     try:
-        async with httpx.AsyncClient() as disco:
+        async with httpx.AsyncClient(cookies=dict(seed_cookies or {})) as disco:
             home = await disco.get("https://x.com/", headers=headers, timeout=30)
             page = home.text
 
@@ -294,7 +300,13 @@ async def _resolve_query_id(gql_client, operation_name: str, hardcoded_id: str,
         if not force and (now - _gql_last_discovery) < _GQL_DISCOVERY_MIN_INTERVAL:
             return hardcoded_id
         _gql_last_discovery = now
-        discovered = await _discover_gql_query_ids()
+        seed_cookies = {}
+        try:
+            # Read-only snapshot — never write anything back to this jar.
+            seed_cookies = dict(gql_client.base.http.cookies)
+        except Exception:
+            pass
+        discovered = await _discover_gql_query_ids(seed_cookies)
         _gql_id_cache.update(discovered)
 
     return _gql_id_cache.get(operation_name, hardcoded_id)
