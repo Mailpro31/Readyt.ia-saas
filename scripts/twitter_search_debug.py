@@ -56,10 +56,25 @@ def main():
           f"for query={query!r}, product=Latest ...\n")
 
     async def _raw_search():
-        response, resp_obj = await bot.client.gql.search_timeline(
-            query, "Latest", 20, None
-        )
-        return response, resp_obj
+        # X's search endpoint has been observed 404ing intermittently (same
+        # call, same session, succeeds sometimes and 404s other times a few
+        # seconds apart) — retry a few times with a short pause so a single
+        # unlucky attempt doesn't look like a hard failure.
+        import asyncio as _asyncio
+        for attempt in range(4):
+            try:
+                response, resp_obj = await bot.client.gql.search_timeline(
+                    query, "Latest", 20, None
+                )
+                if attempt > 0:
+                    print(f"(succeeded on attempt {attempt + 1}/4 — "
+                          f"confirms the 404s are intermittent)")
+                return response, resp_obj
+            except Exception as e:
+                print(f"Attempt {attempt + 1}/4 failed: {type(e).__name__}: {e}")
+                if attempt < 3:
+                    await _asyncio.sleep(3)
+        raise RuntimeError("All 4 attempts failed")
 
     response, resp_obj = _run_async_safe(_raw_search())
 

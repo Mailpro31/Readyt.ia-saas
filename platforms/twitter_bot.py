@@ -369,7 +369,28 @@ class TwitterBot(BasePlatform):
 
             stats["terms_tried"] += 1
             try:
-                tweets = await self.client.search_tweet(term, product="Latest")
+                # X's search endpoint has been observed 404ing intermittently
+                # (not a stale-ID or auth problem — confirmed via live
+                # diagnostics: the exact same call sometimes 200s with real
+                # results, sometimes 404s, on the same session seconds apart —
+                # consistent with anti-bot rate-limiting on a fresh account).
+                # Retry a couple times with a short pause before giving up on
+                # this term for the cycle.
+                tweets = None
+                last_404 = None
+                for attempt in range(3):
+                    try:
+                        tweets = await self.client.search_tweet(term, product="Latest")
+                        last_404 = None
+                        break
+                    except Exception as e:
+                        if "404" not in str(e) and type(e).__name__ != "NotFound":
+                            raise
+                        last_404 = e
+                        if attempt < 2:
+                            await asyncio.sleep(random.uniform(2, 5))
+                if last_404 is not None:
+                    raise last_404
                 # Reset failure counter on success
                 self._keyword_failures[term] = 0
                 added = _process_tweets(tweets, term)
