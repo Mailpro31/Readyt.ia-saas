@@ -114,6 +114,12 @@ _L: Dict[str, Dict[str, str]] = {
     "no_account_mgr":  {"en": "Account manager not available.",
                         "fr": "Gestionnaire de comptes indisponible."},
 
+    # Generic error surfaced by the global error handler.
+    "cmd_error":       {"en": "⚠️ The command {cmd} failed.\n📋 Reason: {detail}\n\n"
+                              "If it keeps happening, forward me this message.",
+                        "fr": "⚠️ La commande {cmd} a échoué.\n📋 Cause : {detail}\n\n"
+                              "Si ça se reproduit, transfère-moi ce message."},
+
     # /lang
     "lang_usage":      {"en": "Usage: /lang fr  (or)  /lang en",
                         "fr": "Usage : /lang fr  (ou)  /lang en"},

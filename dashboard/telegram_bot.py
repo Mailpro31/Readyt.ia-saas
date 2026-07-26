@@ -201,8 +201,31 @@ class TelegramDashboard:
         self.app.add_handler(CommandHandler("performance", self._cmd_performance))
         self.app.add_handler(CommandHandler("debug", self._cmd_debug))
         self.app.add_handler(CommandHandler("lang", self._cmd_lang))
+        # Global safety net: any command that raises replies with a precise
+        # error instead of failing silently.
+        self.app.add_error_handler(self._on_error)
         # The native "/" command menu is registered in _async_polling() after
         # the app initializes (see _post_init).
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reply with a precise error whenever a command handler raises."""
+        err = context.error
+        cmd = ""
+        try:
+            if isinstance(update, Update) and update.message and update.message.text:
+                cmd = update.message.text.split()[0]
+        except Exception:
+            pass
+        logger.error("Command %s failed: %s", cmd or "?", err, exc_info=err)
+        detail = f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
+        try:
+            if isinstance(update, Update) and update.effective_chat:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=self.t("cmd_error", cmd=cmd or "?", detail=detail[:600]),
+                )
+        except Exception:
+            pass
 
     async def _post_init(self, app) -> None:
         """Register the native command menu (descriptions shown when typing '/')."""
@@ -223,6 +246,19 @@ class TelegramDashboard:
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
+
+    @staticmethod
+    def _is_placeholder_account(username: str) -> bool:
+        """True for the template/example accounts shipped in the config files."""
+        u = (username or "").lower().strip()
+        if not u:
+            return True
+        return (
+            u.startswith("your_")
+            or u.startswith("yourusername")
+            or u in ("your_reddit_username", "your_twitter_username")
+            or u.startswith("+123456")
+        )
 
     async def _cmd_lang(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Switch the bot's UI language. Usage: /lang fr | /lang en"""
@@ -749,21 +785,25 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Research & Trends\n\n"
+            fr = self._lang == "fr"
+            text = ("🔎 RECHERCHE & TENDANCES\n──────────────\n" if fr
+                    else "🔎 RESEARCH & TRENDS\n──────────────\n")
+            _cat_icon = {"talking_point": "💬", "news": "📰", "insight": "💡"}
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
+                    text += f"\n📁 {proj_name}\n"
 
-                    # Knowledge base entries
                     knowledge = self.db.get_knowledge(proj_name, limit=10)
-                    if knowledge:
-                        text += f"--- {proj_name} ---\n"
-                        for k in knowledge:
-                            cat = k.get("category", "?")
-                            topic = k.get("topic", "")
-                            used = k.get("used_count", 0)
-                            text += f"  [{cat}] {topic} (used {used}x)\n"
-                        text += "\n"
+                    for k in knowledge:
+                        cat = k.get("category", "")
+                        topic = (k.get("topic", "") or "").strip()
+                        if len(topic) > 90:
+                            topic = topic[:88] + "…"
+                        used = k.get("used_count", 0)
+                        icon = _cat_icon.get(cat, "•")
+                        tail = f" · {used}×" if used else ""
+                        text += f"  {icon} {topic}{tail}\n"
 
                     # Subreddit trends
                     subs = proj.get("reddit", {}).get("target_subreddits", {})
@@ -773,20 +813,16 @@ class TelegramDashboard:
                         all_subs = subs[:3]
                     else:
                         all_subs = []
-
                     for sub in all_subs:
                         trends = self.db.get_subreddit_trends(sub, proj_name)
-                        if trends:
-                            t = trends[0]
-                            themes = t.get("top_themes", "")
-                            if themes:
-                                text += f"  r/{sub} trending: {themes[:100]}\n"
+                        if trends and trends[0].get("top_themes"):
+                            text += f"  📈 r/{sub}: {trends[0]['top_themes'][:90]}\n"
 
                     if not knowledge and not all_subs:
-                        text += f"--- {proj_name} ---\nNo research data yet.\n"
-                    text += "\n"
+                        text += ("  (pas encore de données de recherche)\n" if fr
+                                 else "  (no research data yet)\n")
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load research: {e}"
 
@@ -1091,9 +1127,12 @@ class TelegramDashboard:
             return
 
         try:
-            accounts = self._account_manager.list_all_accounts()
+            accounts = [
+                a for a in self._account_manager.list_all_accounts()
+                if not self._is_placeholder_account(a.get("username"))
+            ]
             if not accounts:
-                await update.message.reply_text("No accounts configured yet.")
+                await update.message.reply_text(self.t("accounts_none"))
                 return
 
             text = f"{self.t('accounts_header')} ({len(accounts)})\n──────────────\n"
@@ -1323,9 +1362,12 @@ class TelegramDashboard:
         import json as _json
         from core.cookie_import import KEY_COOKIES
 
-        accounts = self._account_manager.list_all_accounts()
+        accounts = [
+            a for a in self._account_manager.list_all_accounts()
+            if not self._is_placeholder_account(a.get("username"))
+        ]
         if not accounts:
-            await update.message.reply_text("No accounts configured yet.")
+            await update.message.reply_text(self.t("cookies_none"))
             return
 
         text = f"{self.t('cookies_header')}\n──────────────\n"
@@ -1409,13 +1451,20 @@ class TelegramDashboard:
             )
         except Exception as e:
             msg = str(e)
-            if "KEY_BYTE" in msg or "ClientTransaction" in msg:
+            detail = f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+            if "KEY_BYTE" in msg or "ClientTransaction" in msg or "ondemand" in msg:
                 self.send_alert_sync(
-                    "🐦 X test: ⚠️ twikit anti-bot token issue (upstream "
-                    f"twikit break): {msg}"
+                    "🐦 X test: ⚠️ twikit anti-bot token issue (upstream twikit "
+                    f"break — see the patch). Detail: {detail}"
+                )
+            elif "cookie" in msg.lower() or "auth" in msg.lower() or "login" in msg.lower():
+                self.send_alert_sync(
+                    f"🐦 X test: ❌ {detail}\n"
+                    "→ Looks like a session/cookie problem. Re-paste with "
+                    "/pastecookies twitter <user> <cookies>."
                 )
             else:
-                self.send_alert_sync(f"🐦 X test: ❌ error: {msg}")
+                self.send_alert_sync(f"🐦 X test: ❌ {detail}")
 
     async def _cmd_warmup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show account warm-up progress per account (Reddit + X)."""
