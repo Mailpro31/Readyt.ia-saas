@@ -159,14 +159,40 @@ reddit:
 # residential IP (e.g. home Raspberry Pi) is much more reliable.
 twitter:
   enabled: true
+  # scan_pages: how many result pages to page through per term (more = wider
+  # reach per scan). Deduped across terms. 3 pages ≈ up to ~60 tweets/term.
+  scan_pages: 3
   keywords:
+    # High-volume intent terms (broad reach — relevance is handled by scoring,
+    # so off-topic tweets score low and won't be replied to)
     - "voice typing"
+    - "voice to text"
+    - "speech to text"
     - "dictation software"
-    - "speech to text app"
-    - "dragon naturallyspeaking alternative"
+    - "dictation app"
+    - "voice dictation"
+    - "type by voice"
+    - "talk to type"
+    - "transcribe my voice"
+    - "dragon naturallyspeaking"
+    - "dragon dictation"
+    - "wispr flow"
+    - "otter.ai"
+    - "talon voice"
+    # Audience/pain-point terms (accessibility, ADHD, dysgraphia, RSI)
+    - "typing hurts my hands"
+    - "rsi typing"
+    - "dysgraphia"
+    - "writing is hard adhd"
+    - "hate typing"
   hashtags:
     - "#accessibility"
+    - "#a11y"
     - "#ADHD"
+    - "#dysgraphia"
+    - "#dictation"
+    - "#voicetotext"
+    - "#speechtotext"
   tweet_style: "helpful_casual"
 
 telegram:

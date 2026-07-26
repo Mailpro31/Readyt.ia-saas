@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -162,6 +163,7 @@ class TelegramDashboard:
         self.app.add_handler(CommandHandler("accounts", self._cmd_accounts))
         self.app.add_handler(CommandHandler("addreddit", self._cmd_add_reddit))
         self.app.add_handler(CommandHandler("addtwitter", self._cmd_add_twitter))
+        self.app.add_handler(CommandHandler("pastecookies", self._cmd_paste_cookies))
         self.app.add_handler(CommandHandler("removeaccount", self._cmd_remove_account))
         self.app.add_handler(CommandHandler("llm", self._cmd_llm))
         self.app.add_handler(CommandHandler("hubs", self._cmd_hubs))
@@ -198,8 +200,9 @@ class TelegramDashboard:
             "/llm — Dual-LLM stats (Groq + Ollama)\n\n"
             "-- Accounts --\n"
             "/accounts — List all accounts\n"
-            "/addreddit user pass — Add Reddit account\n"
-            "/addtwitter user email pass — Add X account\n"
+            "/addreddit user pass [projects] — Add Reddit account\n"
+            "/addtwitter user email pass [projects] — Add X account\n"
+            "/pastecookies platform user <cookies> — Paste session cookies\n"
             "/removeaccount platform user — Disable account\n\n"
             "-- Debugging --\n"
             "/debug — Why am I not acting? Show recent skipped decisions\n\n"
@@ -1144,11 +1147,102 @@ class TelegramDashboard:
             )
             await update.message.reply_text(
                 f"{result}\n\n"
-                f"The bot will try to login on next action.\n"
-                f"If 2FA is needed, add totp_secret in the YAML."
+                f"X blocks automated password login, so paste your session "
+                f"cookies instead:\n"
+                f"/pastecookies twitter {username} <paste cookies>\n\n"
+                f"(Export them with a Cookie-Editor extension while logged in "
+                f"to x.com — you need auth_token, ct0, twid.)"
             )
         except Exception as e:
             await update.message.reply_text(f"Failed to add account: {e}")
+
+    async def _cmd_paste_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Paste browser session cookies for an account, from the phone.
+
+        Usage: /pastecookies <platform> <username> <cookies>
+        <cookies> may be a Cookie-Editor JSON export, a "name=value; ..."
+        string, or a Netscape cookie file — all on the same message.
+        """
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._account_manager:
+            await update.message.reply_text("Account manager not available.")
+            return
+
+        # Parse from the raw text so the cookie blob (which contains spaces and
+        # newlines) is preserved. split(None, 3) → [cmd, platform, user, blob].
+        text = update.message.text or ""
+        parts = text.split(None, 3)
+        if len(parts) < 4:
+            await update.message.reply_text(
+                "Usage: /pastecookies <platform> <username> <cookies>\n"
+                "Example: /pastecookies twitter myuser [{\"name\":\"auth_token\",...}]\n"
+                "Cookies can be a Cookie-Editor JSON export, a "
+                "'name=value; name2=value2' string, or a Netscape file."
+            )
+            return
+
+        platform = parts[1].lower()
+        if platform == "x":
+            platform = "twitter"
+        username = parts[2]
+        raw = parts[3]
+
+        if platform not in ("reddit", "twitter"):
+            await update.message.reply_text(
+                f"Unknown platform '{platform}'. Use reddit or twitter."
+            )
+            return
+
+        try:
+            from core.cookie_import import (
+                parse_cookie_blob, write_cookie_file, KEY_COOKIES,
+            )
+
+            cookie_dict = parse_cookie_blob(raw)
+            if not cookie_dict:
+                await update.message.reply_text(
+                    "Couldn't parse any cookies. Paste a Cookie-Editor JSON "
+                    "export, a 'name=value; ...' string, or a Netscape file."
+                )
+                return
+
+            # Resolve the target account and its cookie file path.
+            accounts = self._account_manager.load_accounts(platform)
+            target = next(
+                (a for a in accounts if a.get("username", "").lower() == username.lower()),
+                None,
+            )
+            if not target:
+                await update.message.reply_text(
+                    f"Account @{username} not found for {platform}. "
+                    f"Add it first (/add{platform} …)."
+                )
+                return
+
+            cookies_file = target.get(
+                "cookies_file", f"data/cookies/{platform}_{username}.json"
+            )
+            # Security: keep the write inside data/.
+            abs_path = os.path.abspath(cookies_file)
+            if not abs_path.startswith(os.path.abspath("data") + os.sep):
+                await update.message.reply_text("Invalid cookies file path.")
+                return
+
+            write_cookie_file(cookies_file, platform, cookie_dict)
+
+            keys = KEY_COOKIES.get(platform, [])
+            found = [k for k in keys if k in cookie_dict]
+            missing = [k for k in keys if k not in cookie_dict]
+            msg = (
+                f"Saved {len(cookie_dict)} cookies for @{username} ({platform}).\n"
+                f"Key cookies found: {', '.join(found) or 'none'}"
+            )
+            if missing:
+                msg += f"\nMissing (session may not work): {', '.join(missing)}"
+            await update.message.reply_text(msg)
+        except Exception as e:
+            await update.message.reply_text(f"Failed to save cookies: {e}")
 
     async def _cmd_remove_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Disable an account. Usage: /removeaccount reddit username"""

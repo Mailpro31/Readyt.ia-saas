@@ -246,102 +246,117 @@ class TwitterBot(BasePlatform):
     # ── Async methods ────────────────────────────────────────────────
 
     async def scan_async(self, project: Dict) -> List[Dict]:
-        """Scan Twitter for relevant tweets by keywords."""
+        """Scan Twitter for relevant tweets by keywords AND hashtags.
+
+        Maximises coverage: searches every keyword and hashtag, and pages
+        through several result pages per term (``twitter.scan_pages``, default
+        3). Deduplicates tweets across terms/pages.
+        """
         await self.authenticate()
 
         opportunities = []
         twitter_config = project.get("twitter", {})
-        keywords = twitter_config.get("keywords", [])
+        keywords = list(twitter_config.get("keywords", []) or [])
+        hashtags = list(twitter_config.get("hashtags", []) or [])
+        # Search keywords + hashtags; dedupe while preserving order.
+        search_terms = list(dict.fromkeys(keywords + hashtags))
+        max_pages = max(1, int(twitter_config.get("scan_pages", 3)))
         project_name = project.get("project", {}).get("name", "unknown")
         seen_ids = set()
 
-        for keyword in keywords:
-            # Skip keywords that have failed 3+ times in a row (404 etc)
-            if self._keyword_failures.get(keyword, 0) >= 3:
-                logger.debug(f"Skipping keyword '{keyword}' (failed {self._keyword_failures[keyword]}x)")
+        def _process_tweets(tweets, term) -> int:
+            """Turn a page of tweets into opportunities. Returns count added."""
+            added = 0
+            for tweet in (tweets or []):
+                tweet_id = str(tweet.id)
+                if tweet_id in seen_ids:
+                    continue
+                seen_ids.add(tweet_id)
+
+                if self._already_acted(tweet_id):
+                    continue
+
+                tweet_text = tweet.text if hasattr(tweet, "text") else str(tweet)
+                user_name = (
+                    tweet.user.screen_name
+                    if hasattr(tweet, "user") and tweet.user
+                    else "unknown"
+                )
+                favorite_count = getattr(tweet, "favorite_count", 0) or 0
+                retweet_count = getattr(tweet, "retweet_count", 0) or 0
+                reply_count = getattr(tweet, "reply_count", 0) or 0
+                followers = (
+                    getattr(tweet.user, "followers_count", 0)
+                    if hasattr(tweet, "user") and tweet.user
+                    else 0
+                ) or 0
+
+                opp = {
+                    "platform": "twitter",
+                    "target_id": tweet_id,
+                    "text": tweet_text,
+                    "user": user_name,
+                    "keyword": term,
+                    "favorite_count": favorite_count,
+                    "retweet_count": retweet_count,
+                    "reply_count": reply_count,
+                    "followers": followers,
+                }
+                opp["relevance_score"] = self._score_opportunity(opp, project)
+                opportunities.append(opp)
+                added += 1
+
+                self.db.log_opportunity(
+                    platform="twitter",
+                    target_id=tweet_id,
+                    title=tweet_text[:100],
+                    subreddit_or_query=term,
+                    score=opp["relevance_score"],
+                    project=project_name,
+                    metadata={
+                        "keyword": term,
+                        "user": user_name,
+                        "text": tweet_text[:500],
+                        "favorites": favorite_count,
+                        "retweets": retweet_count,
+                        "reply_count": reply_count,
+                        "followers": followers,
+                    },
+                )
+            return added
+
+        for term in search_terms:
+            # Skip terms that have failed 3+ times in a row (404 etc)
+            if self._keyword_failures.get(term, 0) >= 3:
+                logger.debug(f"Skipping term '{term}' (failed {self._keyword_failures[term]}x)")
                 continue
 
             try:
-                tweets = await self.client.search_tweet(
-                    keyword, product="Latest"
-                )
-                if not tweets:
-                    continue
+                tweets = await self.client.search_tweet(term, product="Latest")
                 # Reset failure counter on success
-                self._keyword_failures[keyword] = 0
+                self._keyword_failures[term] = 0
+                _process_tweets(tweets, term)
 
-                for tweet in tweets:
-                    tweet_id = str(tweet.id)
-                    if tweet_id in seen_ids:
-                        continue
-                    seen_ids.add(tweet_id)
-
-                    if self._already_acted(tweet_id):
-                        continue
-
-                    tweet_text = tweet.text if hasattr(tweet, "text") else str(tweet)
-                    user_name = (
-                        tweet.user.screen_name
-                        if hasattr(tweet, "user") and tweet.user
-                        else "unknown"
-                    )
-
-                    # Extract engagement metrics
-                    favorite_count = getattr(tweet, "favorite_count", 0) or 0
-                    retweet_count = getattr(tweet, "retweet_count", 0) or 0
-                    reply_count = getattr(tweet, "reply_count", 0) or 0
-                    followers = (
-                        getattr(tweet.user, "followers_count", 0)
-                        if hasattr(tweet, "user") and tweet.user
-                        else 0
-                    ) or 0
-
-                    opp = {
-                        "platform": "twitter",
-                        "target_id": tweet_id,
-                        "text": tweet_text,
-                        "user": user_name,
-                        "keyword": keyword,
-                        "favorite_count": favorite_count,
-                        "retweet_count": retweet_count,
-                        "reply_count": reply_count,
-                        "followers": followers,
-                    }
-
-                    # Score the opportunity
-                    opp["relevance_score"] = self._score_opportunity(
-                        opp, project
-                    )
-
-                    opportunities.append(opp)
-
-                    self.db.log_opportunity(
-                        platform="twitter",
-                        target_id=tweet_id,
-                        title=tweet_text[:100],
-                        subreddit_or_query=keyword,
-                        score=opp["relevance_score"],
-                        project=project_name,
-                        metadata={
-                            "keyword": keyword,
-                            "user": user_name,
-                            "text": tweet_text[:500],
-                            "favorites": favorite_count,
-                            "retweets": retweet_count,
-                            "reply_count": reply_count,
-                            "followers": followers,
-                        },
-                    )
+                # Page through additional result pages for wider coverage.
+                page = 1
+                while tweets and page < max_pages:
+                    try:
+                        tweets = await tweets.next()
+                    except Exception:
+                        break
+                    if not tweets:
+                        break
+                    _process_tweets(tweets, term)
+                    page += 1
+                    await asyncio.sleep(random.uniform(1, 3))
 
             except Exception as e:
                 err_str = str(e)
                 # Known upstream breakage: X changed its ondemand.s.js bundle
                 # (~2026-03-18) and twikit 2.3.3 can no longer build the
-                # required x-client-transaction-id header, so every authed
-                # request fails identically. This affects ALL twikit users
-                # regardless of IP/cookies — tracked at github.com/d60/twikit
-                # issues #408 / PR #411 (no fixed release yet). Log it once and
-                # stop hammering every keyword with the same error.
+                # required x-client-transaction-id header. If our runtime patch
+                # (platforms/twikit_patch.py) can't cope either, log once and
+                # stop hammering every term with the same error.
                 if (
                     "KEY_BYTE" in err_str
                     or "ClientTransaction" in err_str
@@ -350,15 +365,14 @@ class TwitterBot(BasePlatform):
                     logger.warning(
                         "Twitter/X scan skipped: twikit can't generate X's "
                         "anti-bot token (x-client-transaction-id). Known "
-                        "upstream break since 2026-03-18 (twikit #408) — NOT "
-                        "an IP or cookie problem. X will work again once "
-                        "twikit ships a fix. Underlying error: %s", err_str
+                        "upstream break (twikit #408). Underlying error: %s",
+                        err_str,
                     )
                     break
-                logger.error(f"Twitter scan error for '{keyword}': {err_str}")
+                logger.error(f"Twitter scan error for '{term}': {err_str}")
                 # Track persistent failures (404s) to skip them next cycle
                 if "404" in err_str or "not found" in err_str.lower():
-                    self._keyword_failures[keyword] = self._keyword_failures.get(keyword, 0) + 1
+                    self._keyword_failures[term] = self._keyword_failures.get(term, 0) + 1
 
             await asyncio.sleep(random.uniform(3, 8))
 
@@ -366,8 +380,8 @@ class TwitterBot(BasePlatform):
             key=lambda x: x.get("relevance_score", 0), reverse=True
         )
         logger.info(
-            f"Twitter scan for {project_name}: "
-            f"found {len(opportunities)} opportunities"
+            f"Twitter scan for {project_name}: found {len(opportunities)} "
+            f"opportunities across {len(search_terms)} terms"
         )
         return opportunities
 
