@@ -164,6 +164,8 @@ class TelegramDashboard:
         self.app.add_handler(CommandHandler("addreddit", self._cmd_add_reddit))
         self.app.add_handler(CommandHandler("addtwitter", self._cmd_add_twitter))
         self.app.add_handler(CommandHandler("pastecookies", self._cmd_paste_cookies))
+        self.app.add_handler(CommandHandler("cookies", self._cmd_cookies))
+        self.app.add_handler(CommandHandler("testtwitter", self._cmd_test_twitter))
         self.app.add_handler(CommandHandler("removeaccount", self._cmd_remove_account))
         self.app.add_handler(CommandHandler("llm", self._cmd_llm))
         self.app.add_handler(CommandHandler("hubs", self._cmd_hubs))
@@ -200,6 +202,8 @@ class TelegramDashboard:
             "/llm — Dual-LLM stats (Groq + Ollama)\n\n"
             "-- Accounts --\n"
             "/accounts — List all accounts\n"
+            "/cookies — Session cookie health (valid / expired)\n"
+            "/testtwitter — Test X now (connect + scan)\n"
             "/addreddit user pass [projects] — Add Reddit account\n"
             "/addtwitter user email pass [projects] — Add X account\n"
             "/pastecookies platform user <cookies> — Paste session cookies\n"
@@ -231,26 +235,31 @@ class TelegramDashboard:
         if not self._is_admin(update.effective_user.id):
             return
 
-        paused_str = "Taking a break" if self.paused else "Working"
+        state = "⏸ Paused (taking a break)" if self.paused else "▶️ Working"
         stats = self.db.get_stats_summary(hours=24)
         total_actions = sum(
             sum(t.values()) for t in stats.get("actions", {}).values()
         )
         avg_score = stats.get("avg_opportunity_score", 0)
+        pending = stats.get("opportunities", {}).get("pending", 0)
 
-        text = f"I'm currently: {paused_str}\n"
-        text += f"Actions today: {total_actions}\n"
-
+        text = "📊 STATUS (last 24h)\n"
+        text += "──────────────\n"
+        text += f"State: {state}\n"
+        text += f"Actions taken: {total_actions}\n"
+        text += f"Opportunities waiting: {pending}\n"
         if avg_score:
             text += f"Avg opportunity quality: {avg_score}/10\n"
 
-        for platform, types in stats.get("actions", {}).items():
-            counts = ", ".join(f"{v} {k}s" for k, v in types.items())
-            emoji = "Reddit" if platform == "reddit" else "Twitter"
-            text += f"\n{emoji}: {counts}"
-
-        if not stats.get("actions"):
-            text += "\nNothing done yet today. Still warming up."
+        actions = stats.get("actions", {})
+        if actions:
+            text += "\nBy platform:\n"
+            for platform, types in actions.items():
+                name = "🟠 Reddit" if platform == "reddit" else "🐦 X"
+                counts = ", ".join(f"{v} {k}(s)" for k, v in types.items())
+                text += f"  {name}: {counts}\n"
+        else:
+            text += "\nNothing done yet today — still warming up.\n"
 
         await update.message.reply_text(text)
 
@@ -407,24 +416,26 @@ class TelegramDashboard:
         if not self._is_admin(update.effective_user.id):
             return
 
-        text = "Account status:\n\n"
+        text = "🩺 ACCOUNT HEALTH\n──────────────\n"
 
         if self._account_manager:
             health = self._account_manager.get_all_health()
+            if not health:
+                text += "No accounts configured yet.\n"
             for acc in health:
-                status_word = {
-                    "healthy": "Good",
-                    "cooldown": "Cooling down",
-                    "warned": "Flagged",
-                    "banned": "BANNED",
-                }.get(acc["status"], "Unknown")
-                platform = "Reddit" if acc["platform"] == "reddit" else "Twitter"
+                icon, status_word = {
+                    "healthy": ("✅", "Good"),
+                    "cooldown": ("🕒", "Cooling down"),
+                    "warned": ("⚠️", "Flagged"),
+                    "banned": ("⛔", "BANNED"),
+                }.get(acc["status"], ("❔", "Unknown"))
+                platform = "🟠 Reddit" if acc["platform"] == "reddit" else "🐦 X"
                 text += (
-                    f"{platform} @{acc['username']}: {status_word} "
-                    f"({acc['actions_24h']} actions today)\n"
+                    f"{icon} {platform} @{acc['username']}: {status_word} "
+                    f"— {acc['actions_24h']} actions today\n"
                 )
                 if acc.get("cooldown_until"):
-                    text += f"  Back online: {acc['cooldown_until'][:16]}\n"
+                    text += f"    ↳ back online: {acc['cooldown_until'][:16]}\n"
         else:
             text += "Can't check right now."
 
@@ -561,13 +572,17 @@ class TelegramDashboard:
             await update.message.reply_text("I'm not connected to the main engine right now.")
             return
 
-        await update.message.reply_text("On it — scanning all platforms now. I'll let you know what I find.")
+        await update.message.reply_text(
+            "🔍 Scanning now (Reddit + X) for tweets/posts matching your "
+            "keywords…\nThis runs in the background — I'll send a separate "
+            "message when opportunities are found (or check /status)."
+        )
         try:
             import threading
             t = threading.Thread(target=self._orchestrator._scan_all_safe, daemon=True)
             t.start()
         except Exception as e:
-            await update.message.reply_text(f"Something went wrong: {e}")
+            await update.message.reply_text(f"⚠️ Something went wrong: {e}")
 
     async def _cmd_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
@@ -576,16 +591,20 @@ class TelegramDashboard:
             await update.message.reply_text("Not connected to the engine.")
             return
         if self.paused:
-            await update.message.reply_text("I'm paused right now. /resume me first.")
+            await update.message.reply_text("⏸ I'm paused right now — /resume me first.")
             return
 
-        await update.message.reply_text("Looking for the best opportunity to act on...")
+        await update.message.reply_text(
+            "✍️ Looking for the best opportunity to reply to right now…\n"
+            "I'll act on it in the background (respecting the per-account "
+            "rate limits) and log it — check /last to see what I posted."
+        )
         try:
             import threading
             t = threading.Thread(target=self._orchestrator._act_on_best_safe, daemon=True)
             t.start()
         except Exception as e:
-            await update.message.reply_text(f"Couldn't do it: {e}")
+            await update.message.reply_text(f"⚠️ Couldn't do it: {e}")
 
     async def _cmd_projects(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
@@ -1059,16 +1078,16 @@ class TelegramDashboard:
                 await update.message.reply_text("No accounts configured yet.")
                 return
 
-            text = f"All accounts ({len(accounts)}):\n\n"
+            text = f"👥 ACCOUNTS ({len(accounts)})\n──────────────\n"
             for acc in accounts:
-                plat = "Reddit" if acc["platform"] == "reddit" else "X"
-                status = "ON" if acc["enabled"] else "OFF"
-                cookies = "cookies OK" if acc["has_cookies"] else "no cookies"
+                plat = "🟠 Reddit" if acc["platform"] == "reddit" else "🐦 X"
+                status = "🟢 ON" if acc["enabled"] else "⚪ OFF"
+                cookies = "🍪 cookies OK" if acc["has_cookies"] else "❌ no cookies"
                 projects = ", ".join(acc["projects"]) if acc["projects"] else "none"
                 text += (
-                    f"  {plat} @{acc['username']} [{status}]\n"
-                    f"    Persona: {acc['persona']} | {cookies}\n"
-                    f"    Projects: {projects}\n\n"
+                    f"\n{plat} @{acc['username']}  [{status}]\n"
+                    f"    {cookies} · persona: {acc['persona']}\n"
+                    f"    projects: {projects}\n"
                 )
 
             await update.message.reply_text(text)
@@ -1271,6 +1290,115 @@ class TelegramDashboard:
             await update.message.reply_text(result)
         except Exception as e:
             await update.message.reply_text(f"Failed: {e}")
+
+    async def _cmd_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show cookie/session status per account (which key cookies are present)."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._account_manager:
+            await update.message.reply_text("Account manager not available.")
+            return
+
+        import json as _json
+        from core.cookie_import import KEY_COOKIES
+
+        accounts = self._account_manager.list_all_accounts()
+        if not accounts:
+            await update.message.reply_text("No accounts configured yet.")
+            return
+
+        text = "🍪 COOKIE STATUS\n──────────────\n"
+        for acc in accounts:
+            platform = acc["platform"]
+            if platform == "telegram":
+                continue
+            name = "🟠 Reddit" if platform == "reddit" else "🐦 X"
+            cf = acc.get("cookies_file", "")
+            if not cf or not os.path.exists(cf):
+                text += f"\n{name} @{acc['username']}: ❌ no cookie file — use /pastecookies\n"
+                continue
+            try:
+                with open(cf) as f:
+                    raw = _json.load(f)
+                names = set(raw.keys()) if isinstance(raw, dict) else {
+                    c.get("name") for c in raw if isinstance(c, dict)
+                }
+            except Exception:
+                names = set()
+            keys = KEY_COOKIES.get(platform, [])
+            missing = [k for k in keys if k not in names]
+            if missing:
+                text += (
+                    f"\n{name} @{acc['username']}: ⚠️ missing {', '.join(missing)}\n"
+                    f"    ↳ re-paste with /pastecookies {platform} {acc['username']} <cookies>\n"
+                )
+            else:
+                text += f"\n{name} @{acc['username']}: ✅ session cookies present\n"
+
+        text += (
+            "\nℹ️ Cookies expire over time. If a platform stops working, "
+            "re-export them (Cookie-Editor) and re-paste with /pastecookies."
+        )
+        await update.message.reply_text(text)
+
+    async def _cmd_test_twitter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Test the X account end-to-end (connect + a real scan) from the phone."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._orchestrator:
+            await update.message.reply_text("I'm not connected to the main engine right now.")
+            return
+        await update.message.reply_text(
+            "🐦 Testing X — connecting and running a real scan…\n"
+            "I'll send the result in a moment."
+        )
+        import threading
+        threading.Thread(target=self._run_twitter_test, daemon=True).start()
+
+    def _run_twitter_test(self):
+        """Background worker for /testtwitter. Reports via send_alert_sync."""
+        try:
+            acc = (
+                self._account_manager.get_next_account("twitter")
+                if self._account_manager else None
+            )
+            if not acc:
+                self.send_alert_sync(
+                    "🐦 X test: no X account configured. Add one with /addtwitter."
+                )
+                return
+            bot = self._orchestrator._get_twitter_bot(acc)
+            if not bot.test_connection():
+                self.send_alert_sync(
+                    "🐦 X test: ❌ couldn't connect. Cookies likely expired — "
+                    f"re-paste with /pastecookies twitter {acc['username']} <cookies>"
+                )
+                return
+            project = next(
+                (p for p in self._orchestrator.projects
+                 if p.get("twitter", {}).get("enabled")),
+                None,
+            )
+            if not project:
+                self.send_alert_sync(
+                    "🐦 X test: ✅ connected. (No X-enabled project to scan — "
+                    "set twitter.enabled: true in a project.)"
+                )
+                return
+            opps = bot.scan(project)
+            self.send_alert_sync(
+                f"🐦 X test: ✅ connected + scan OK — found {len(opps)} "
+                f"opportunities. The bot will reply on its normal cycle."
+            )
+        except Exception as e:
+            msg = str(e)
+            if "KEY_BYTE" in msg or "ClientTransaction" in msg:
+                self.send_alert_sync(
+                    "🐦 X test: ⚠️ twikit anti-bot token issue (upstream "
+                    f"twikit break): {msg}"
+                )
+            else:
+                self.send_alert_sync(f"🐦 X test: ❌ error: {msg}")
 
     # ── Reports ──────────────────────────────────────────────────────
 
