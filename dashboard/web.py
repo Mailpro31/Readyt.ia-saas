@@ -1713,13 +1713,30 @@ h1{{color:#ff6b35}}p{{color:#a0a0c0}}</style></head>
             allowed_dir = os.path.abspath("data")
             if not cookies_file.startswith(allowed_dir + os.sep):
                 raise HTTPException(status_code=400, detail="Invalid cookies file path")
-            # Parse cookies — supports both formats:
-            #   1) document.cookie: "name=value; name2=value2"
-            #   2) Netscape/curl:   ".domain\tTRUE\t/\tTRUE\texpiry\tname\tvalue"
+            # Parse cookies — supports three formats:
+            #   1) JSON array export (Cookie-Editor / browser extension):
+            #      [{"name": "...", "value": "...", "domain": "...", ...}, ...]
+            #   2) document.cookie: "name=value; name2=value2"
+            #   3) Netscape/curl:   ".domain\tTRUE\t/\tTRUE\texpiry\tname\tvalue"
             raw = raw_cookies.strip()
             if raw.startswith(("'", '"')) and raw.endswith(("'", '"')):
                 raw = raw[1:-1]
             cookie_dict = {}
+            # Format 1: JSON export from a browser cookie extension. Handles
+            # both a list of cookie objects and a flat {name: value} object.
+            if raw.startswith(("[", "{")):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        for c in parsed:
+                            if isinstance(c, dict) and "name" in c and "value" in c:
+                                cookie_dict[str(c["name"])] = str(c["value"])
+                    elif isinstance(parsed, dict) and "name" not in parsed:
+                        for k, v in parsed.items():
+                            if isinstance(v, str):
+                                cookie_dict[k] = v
+                except (ValueError, TypeError):
+                    pass
             lines = raw.splitlines()
             is_netscape = any(line.strip().startswith(".") or "\t" in line for line in lines if line.strip() and not line.strip().startswith("#"))
             if is_netscape:

@@ -1310,8 +1310,7 @@ function renderCookies(d) {
   const el = document.getElementById('cookiesStatus');
   if (!el) return;
   if (!d||!d.length) { el.innerHTML='<p class="no-data">No accounts configured</p>'; return; }
-  const filtered = d.filter(c => c.platform !== 'twitter');
-  el.innerHTML = filtered.map(c => {
+  el.innerHTML = d.map(c => {
     const ok = c.has_cookies;
     const keys = (c.key_cookies||[]).join(', ');
     return `<div class="entity-card"><div><div class="name">@${esc(c.username)} <span style="font-family:var(--font-data);font-size:10px;color:var(--text3);text-transform:uppercase">${esc(c.platform)}</span></div><div class="meta">${ok ? `${c.count||'?'} cookies | Keys: ${keys||'none'} | ${c.size_kb||0}KB` : '<span style="color:var(--red)">No cookies — login required</span>'}</div></div><div class="actions-area"><span class="badge ${ok?'on':'off'}">${ok?'Active':'Missing'}</span>${ok?`<button class="btn btn-sm danger" onclick="deleteCookies(${JSON.stringify(c.platform)},${JSON.stringify(c.username)})">Delete</button>`:''}</div></div>`;
