@@ -17,6 +17,29 @@ from typing import List, Dict, Optional
 
 import requests
 
+try:
+    # curl_cffi impersonates a real browser's TLS/HTTP2 fingerprint
+    # (JA3/JA4), not just its headers. Plain `requests` uses Python's own
+    # OpenSSL handshake, which has a distinctive fingerprint that Reddit's
+    # edge (Akamai-style bot detection) flags and 403s regardless of valid
+    # cookies/headers/IP -- confirmed live: a real headless browser (same
+    # cookies, same IP) is recognized as logged-in while `requests` isn't.
+    from curl_cffi import requests as _cffi_requests
+    _HAS_CURL_CFFI = True
+except ImportError:  # pragma: no cover - dev machines without the dep
+    _cffi_requests = None
+    _HAS_CURL_CFFI = False
+
+# curl_cffi raises its own exception hierarchy, not requests'. Catch both so
+# timeout handling works whichever backend ended up in use.
+_TIMEOUT_EXCEPTIONS = (requests.Timeout,)
+if _HAS_CURL_CFFI:
+    try:
+        from curl_cffi.requests.exceptions import Timeout as _CffiTimeout
+        _TIMEOUT_EXCEPTIONS = (requests.Timeout, _CffiTimeout)
+    except ImportError:
+        pass
+
 from platforms.base_platform import BasePlatform
 from core.database import Database
 from core.content_gen import ContentGenerator
@@ -94,8 +117,26 @@ class RedditWebBot(BasePlatform):
             "cookies_file", f"data/cookies/reddit_{self._username}.json"
         )
 
-        # Session for authenticated requests (with connection pooling)
-        self.session = requests.Session()
+        # Session for authenticated requests (with connection pooling).
+        # Prefer curl_cffi (real browser TLS fingerprint) -- Reddit's edge
+        # blocks plain `requests` even with valid cookies. Falls back to
+        # plain requests if curl_cffi isn't installed (degraded but not
+        # broken -- same behavior as before this fix).
+        self._using_curl_cffi = _HAS_CURL_CFFI
+        if _HAS_CURL_CFFI:
+            self.session = _cffi_requests.Session(impersonate="chrome131")
+        else:
+            self.session = requests.Session()
+            from requests.adapters import HTTPAdapter
+            _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
+            self.session.mount("https://", _adapter)
+            self.session.mount("http://", _adapter)
+            logger.warning(
+                "curl_cffi not installed -- falling back to plain requests "
+                "(Reddit may 403 authenticated calls even with valid "
+                "cookies). Run `pip install curl_cffi` to fix."
+            )
+
         _ua = _random_ua()
         self.session.headers.update({
             "User-Agent": _ua,
@@ -105,10 +146,6 @@ class RedditWebBot(BasePlatform):
             "DNT": "1",
             "Upgrade-Insecure-Requests": "1",
         })
-        from requests.adapters import HTTPAdapter
-        _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
-        self.session.mount("https://", _adapter)
-        self.session.mount("http://", _adapter)
 
         # Proxy support: Reddit aggressively blocks many VPS/datacenter IP
         # ranges. account_config["proxy"] (resolved by the orchestrator from
@@ -148,9 +185,19 @@ class RedditWebBot(BasePlatform):
         """Load saved session cookies."""
         if os.path.exists(self._cookies_file):
             try:
-                with open(self._cookies_file) as f:
+                # utf-8-sig tolerates a leading BOM (e.g. from PowerShell's
+                # `Out-File -Encoding utf8`, which writes one by default) --
+                # plain 'utf-8' raises JSONDecodeError on it and this used
+                # to fail *silently* here, leaving the bot unauthenticated
+                # with no obvious error.
+                with open(self._cookies_file, encoding="utf-8-sig") as f:
                     cookies = json.load(f)
-                self.session.cookies.update(cookies)
+                try:
+                    self.session.cookies.update(cookies)
+                except AttributeError:
+                    # curl_cffi's cookie jar doesn't support .update()
+                    for k, v in cookies.items():
+                        self.session.cookies.set(k, v)
                 self._authenticated = True
                 logger.debug(f"Loaded Reddit cookies from {self._cookies_file}")
             except Exception as e:
@@ -160,7 +207,12 @@ class RedditWebBot(BasePlatform):
         """Save session cookies to file (atomic write to prevent corruption)."""
         cookie_dir = os.path.dirname(self._cookies_file)
         os.makedirs(cookie_dir, exist_ok=True)
-        cookies = dict(self.session.cookies)
+        try:
+            cookies = dict(self.session.cookies)
+        except (TypeError, ValueError):
+            # curl_cffi's cookie jar isn't directly dict()-able in all
+            # versions -- fall back to iterating items().
+            cookies = {k: v for k, v in self.session.cookies.items()}
         try:
             fd, tmp_path = tempfile.mkstemp(dir=cookie_dir, suffix=".tmp")
             with os.fdopen(fd, "w") as f:
@@ -510,7 +562,7 @@ class RedditWebBot(BasePlatform):
 
                 logger.warning(f"Reddit search returned {resp.status_code}")
 
-            except requests.Timeout:
+            except _TIMEOUT_EXCEPTIONS:
                 logger.debug(f"Search timeout for r/{subreddit}, attempt {attempt+1}")
                 time.sleep(2 ** attempt)
             except (json.JSONDecodeError, ValueError) as e:
