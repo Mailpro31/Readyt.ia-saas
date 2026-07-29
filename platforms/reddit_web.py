@@ -40,6 +40,21 @@ if _HAS_CURL_CFFI:
     except ImportError:
         pass
 
+try:
+    # Confirmed live (2026-07-29): curl_cffi's TLS impersonation is NOT
+    # enough on its own -- old.reddit.com's JSON API still 403s it with
+    # valid cookies on a residential IP. A real headless Chromium (same
+    # cookies) IS recognized as logged in, which means the block needs a
+    # signal only real browser JS produces. This wraps Playwright as a
+    # requests.Session-compatible adapter (see platforms/reddit_browser.py)
+    # so it's the preferred backend when available.
+    from playwright.sync_api import sync_playwright as _sync_playwright  # noqa: F401
+    from platforms.reddit_browser import RedditBrowserSession
+    _HAS_PLAYWRIGHT = True
+except ImportError:  # pragma: no cover - dev machines without the dep
+    RedditBrowserSession = None
+    _HAS_PLAYWRIGHT = False
+
 from platforms.base_platform import BasePlatform
 from core.database import Database
 from core.content_gen import ContentGenerator
@@ -117,13 +132,27 @@ class RedditWebBot(BasePlatform):
             "cookies_file", f"data/cookies/reddit_{self._username}.json"
         )
 
-        # Session for authenticated requests (with connection pooling).
-        # Prefer curl_cffi (real browser TLS fingerprint) -- Reddit's edge
-        # blocks plain `requests` even with valid cookies. Falls back to
-        # plain requests if curl_cffi isn't installed (degraded but not
-        # broken -- same behavior as before this fix).
-        self._using_curl_cffi = _HAS_CURL_CFFI
-        if _HAS_CURL_CFFI:
+        # Proxy support: Reddit aggressively blocks many VPS/datacenter IP
+        # ranges. account_config["proxy"] (resolved by the orchestrator from
+        # settings.yaml http.reddit_proxy, or per-account) routes ALL Reddit
+        # traffic for this bot through it. Read before session creation --
+        # the Playwright backend needs it at launch time.
+        proxy_url = account_config.get("proxy")
+
+        # Session for authenticated requests. Backend preference:
+        #   1. Playwright (real Chromium) -- the ONLY backend confirmed to
+        #      get past Reddit's old.reddit.com bot detection; needs a real
+        #      JS-executing browser signal, not just a TLS fingerprint.
+        #   2. curl_cffi (TLS-fingerprint impersonation) -- better than
+        #      plain requests but confirmed NOT sufficient on its own.
+        #   3. plain requests -- last resort, most likely to 403.
+        _ua = _random_ua()
+        self._backend = "requests"
+        if _HAS_PLAYWRIGHT:
+            self._backend = "playwright"
+            self.session = RedditBrowserSession(user_agent=_ua, proxy_url=proxy_url)
+        elif _HAS_CURL_CFFI:
+            self._backend = "curl_cffi"
             self.session = _cffi_requests.Session(impersonate="chrome131")
         else:
             self.session = requests.Session()
@@ -132,12 +161,12 @@ class RedditWebBot(BasePlatform):
             self.session.mount("https://", _adapter)
             self.session.mount("http://", _adapter)
             logger.warning(
-                "curl_cffi not installed -- falling back to plain requests "
-                "(Reddit may 403 authenticated calls even with valid "
-                "cookies). Run `pip install curl_cffi` to fix."
+                "Neither Playwright nor curl_cffi available -- falling back "
+                "to plain requests (Reddit may 403 authenticated calls even "
+                "with valid cookies)."
             )
+        self._using_curl_cffi = self._backend == "curl_cffi"  # kept for compat
 
-        _ua = _random_ua()
         self.session.headers.update({
             "User-Agent": _ua,
             "Accept-Language": random.choice(_ACCEPT_LANGUAGES),
@@ -146,12 +175,6 @@ class RedditWebBot(BasePlatform):
             "DNT": "1",
             "Upgrade-Insecure-Requests": "1",
         })
-
-        # Proxy support: Reddit aggressively blocks many VPS/datacenter IP
-        # ranges. account_config["proxy"] (resolved by the orchestrator from
-        # settings.yaml http.reddit_proxy, or per-account) routes ALL Reddit
-        # traffic for this bot through it.
-        proxy_url = account_config.get("proxy")
         if proxy_url:
             self.session.proxies.update({"http": proxy_url, "https": proxy_url})
             logger.info(f"Reddit bot for {self._username}: using proxy")
