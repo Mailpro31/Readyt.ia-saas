@@ -314,12 +314,22 @@ class TelegramDashboard:
             text += f"{self.t('status_quality')}: {avg_score}/10\n"
 
         actions = stats.get("actions", {})
-        if actions:
+        opps_by_platform = stats.get("opportunities_by_platform", {})
+        avg_by_platform = stats.get("avg_opportunity_score_by_platform", {})
+        platforms = sorted(set(actions.keys()) | set(opps_by_platform.keys()))
+        if platforms:
             text += f"\n{self.t('status_by_plat')}:\n"
-            for platform, types in actions.items():
+            for platform in platforms:
                 name = "🟠 Reddit" if platform == "reddit" else "🐦 X"
-                counts = ", ".join(f"{v} {k}(s)" for k, v in types.items())
-                text += f"  {name}: {counts}\n"
+                types = actions.get(platform, {})
+                counts = ", ".join(f"{v} {k}(s)" for k, v in types.items()) or "0"
+                plat_pending = opps_by_platform.get(platform, {}).get("pending", 0)
+                plat_avg = avg_by_platform.get(platform, 0)
+                line = f"  {name}: {counts}"
+                line += f" | {plat_pending} {self.t('status_pending').lower()}"
+                if plat_avg:
+                    line += f" | {plat_avg}/10"
+                text += line + "\n"
         else:
             text += f"\n{self.t('status_nothing')}\n"
 
@@ -349,6 +359,17 @@ class TelegramDashboard:
             total = sum(opps.values())
             pending = opps.get("pending", 0)
             text += f"\nOpportunities: {total} total, {pending} still pending"
+
+        opps_by_platform = stats.get("opportunities_by_platform", {})
+        if opps_by_platform:
+            label = "\nPar plateforme" if self._lang == "fr" else "\nBy platform"
+            text += f"{label}:\n"
+            for platform in sorted(opps_by_platform.keys()):
+                name = "Reddit" if platform == "reddit" else "Twitter"
+                per = opps_by_platform[platform]
+                p_total = sum(per.values())
+                p_pending = per.get("pending", 0)
+                text += f"  {name}: {p_total} total, {p_pending} pending\n"
 
         text += "\n\nCost: $0.00 (running free)"
 
@@ -1628,6 +1649,13 @@ class TelegramDashboard:
         avg = stats.get("avg_opportunity_score", 0)
         if avg:
             report += f" (avg quality: {avg}/10)"
+
+        opps_by_platform = stats.get("opportunities_by_platform", {})
+        if opps_by_platform:
+            for platform in sorted(opps_by_platform.keys()):
+                name = "Reddit" if platform == "reddit" else "Twitter"
+                p_pending = opps_by_platform[platform].get("pending", 0)
+                report += f"\n  {name}: {p_pending} pending"
 
         # Health
         if self._account_manager:
