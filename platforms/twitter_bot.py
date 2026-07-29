@@ -16,6 +16,7 @@ from platforms.twikit_patch import (
     apply_twikit_patch,
     apply_twikit_gql_patch,
     apply_twikit_tweet_parse_patch,
+    apply_twikit_user_parse_patch,
 )
 from core.database import Database
 from core.content_gen import ContentGenerator
@@ -34,6 +35,11 @@ apply_twikit_gql_patch()
 # (X added a new timeline-entry field that broke twikit's generic "first dict
 # with a 'result' key" search). Applied once at import; safe/idempotent.
 apply_twikit_tweet_parse_patch()
+# Fix twikit's User.__init__ crashing with KeyError: 'legacy' on X's newer
+# user-object schema (no more flat 'legacy' dict — fields split across
+# 'core'/'avatar'/'banner'/'profile_bio'/etc). Applied once at import;
+# safe/idempotent.
+apply_twikit_user_parse_patch()
 
 
 import threading

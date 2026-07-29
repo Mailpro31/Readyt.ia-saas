@@ -553,3 +553,116 @@ def apply_twikit_tweet_parse_patch() -> bool:
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("Could not apply twikit tweet-parse patch: %s", e)
         return False
+
+
+# ── User object parsing (X dropped the flat 'legacy' user schema) ────────
+#
+# Confirmed live (2026-07-29): X now returns user results without a
+# top-level 'legacy' key at all — fields are split across 'core' (name,
+# screen_name, created_at), 'avatar' (profile image), 'banner' (profile
+# banner), 'profile_bio' (description), 'privacy' (protected), etc.
+# twikit 2.3.3's User.__init__ unconditionally does `data['legacy']` and
+# `data['rest_id']`, raising KeyError and aborting Tweet construction
+# (silently swallowed upstream as "tweet = None").
+#
+# This patches User.__init__ directly (not a re-imported name) so it applies
+# everywhere the class is used, regardless of which module imported it.
+_applied_user = False
+_user_diag_logged = False
+
+
+def _synthesize_legacy_from_new_schema(data: dict) -> dict:
+    """Best-effort translation of X's newer nested user schema into the
+    flat 'legacy' dict shape twikit's User.__init__ expects. Missing/renamed
+    fields fall back to safe defaults (0 / False / [] / "") rather than
+    raising — for a promo bot, having an approximate follower count is fine;
+    crashing and dropping the whole opportunity is not.
+    """
+    core = data.get("core") or {}
+    avatar = data.get("avatar") or {}
+    banner = data.get("banner") or {}
+    bio = data.get("profile_bio") or {}
+    privacy = data.get("privacy") or {}
+    counts = data.get("relationship_counts") or data.get("action_counts") or {}
+    entities = bio.get("entities") or {}
+    return {
+        "created_at": core.get("created_at", ""),
+        "name": core.get("name", ""),
+        "screen_name": core.get("screen_name", ""),
+        "profile_image_url_https": avatar.get("image_url", ""),
+        "profile_banner_url": banner.get("image_url"),
+        "url": bio.get("url"),
+        "location": (data.get("location") or {}).get("location", ""),
+        "description": bio.get("description", ""),
+        "entities": {
+            "description": {"urls": entities.get("description", {}).get("urls", [])},
+            "url": entities.get("url", {}),
+        },
+        "pinned_tweet_ids_str": (data.get("pinned_items") or []),
+        "verified": data.get("verification") and True or False,
+        "possibly_sensitive": data.get("possibly_sensitive", False),
+        "can_dm": (data.get("dm_permissions") or {}).get("can_dm", True),
+        "can_media_tag": True,
+        "want_retweets": True,
+        "default_profile": False,
+        "default_profile_image": False,
+        "has_custom_timelines": False,
+        "followers_count": counts.get("followers", 0),
+        "fast_followers_count": 0,
+        "normal_followers_count": counts.get("followers", 0),
+        "friends_count": counts.get("following", 0),
+        "favourites_count": 0,
+        "listed_count": 0,
+        "media_count": 0,
+        "statuses_count": counts.get("tweets", 0),
+        "is_translator": False,
+        "translator_type": "none",
+        "withheld_in_countries": [],
+        "protected": privacy.get("protected", False),
+    }
+
+
+def _make_patched_user_init(orig_init):
+    def _patched_init(self, client, data):
+        global _user_diag_logged
+        if "legacy" in data:
+            return orig_init(self, client, data)
+        # New schema: synthesize a compatible dict and retry via the
+        # original __init__ so any future twikit-side logic still runs.
+        try:
+            synthetic = dict(data)
+            synthetic["legacy"] = _synthesize_legacy_from_new_schema(data)
+            synthetic.setdefault("rest_id", data.get("rest_id") or data.get("id"))
+            return orig_init(self, client, synthetic)
+        except Exception as e:
+            if not _user_diag_logged:
+                _user_diag_logged = True
+                logger.warning(
+                    "twikit_patch: User construction still failing after "
+                    "legacy-schema synthesis: %s: %s (data keys=%s)",
+                    type(e).__name__, e, list(data.keys())[:20],
+                )
+            raise
+
+    return _patched_init
+
+
+def apply_twikit_user_parse_patch() -> bool:
+    """Monkeypatch User.__init__ to tolerate X's newer (no-'legacy') user
+    schema. Safe and idempotent; never raises.
+    """
+    global _applied_user
+    if _applied_user:
+        return True
+    try:
+        from twikit.user import User
+        User.__init__ = _make_patched_user_init(User.__init__)
+        _applied_user = True
+        logger.info(
+            "Applied twikit User-parsing patch "
+            "(fixes KeyError: 'legacy' on X's newer user schema)"
+        )
+        return True
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not apply twikit user-parse patch: %s", e)
+        return False
