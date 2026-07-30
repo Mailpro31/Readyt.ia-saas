@@ -821,37 +821,7 @@ class Orchestrator:
 
         logger.info("Starting scan cycle...")
 
-        def _scan_one_project(project: dict) -> None:
-            """Scan a single project — runs in a thread pool worker."""
-            proj_name = project.get("project", {}).get("name", "unknown")
-            try:
-                if not self._check_resources():
-                    logger.debug(f"Scan {proj_name}: resources low, skipping")
-                    return
-                scan_project = self._expand_project_targets(project)
-                scan_project = self._limit_scan_targets(scan_project)
-                account = self.account_mgr.get_next_account("reddit", project=proj_name)
-                if not account:
-                    logger.debug(f"Scan {proj_name}: no account available")
-                    return
-                bot = self._get_reddit_bot(account)
-                opps = bot.scan(scan_project)
-                logger.info(f"Reddit scan for {proj_name}: {len(opps)} opportunities")
-            except Exception as e:
-                logger.error(f"Reddit scan error for {proj_name}: {e}")
-
-        # Run all project scans in parallel — 4× faster than sequential
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=SCAN_MAX_WORKERS,
-            thread_name_prefix="scan",
-        ) as pool:
-            futures = {pool.submit(_scan_one_project, p): p for p in self.projects}
-            for fut in concurrent.futures.as_completed(futures):
-                try:
-                    fut.result()
-                except Exception as e:
-                    proj = futures[fut].get("project", {}).get("name", "?")
-                    logger.error(f"Scan worker crash for {proj}: {e}")
+        self._scan_reddit_all()
 
         # Twitter scan — sequential (twikit is async / event-loop sensitive,
         # so it must not run inside the parallel Reddit thread pool). Only
@@ -865,24 +835,67 @@ class Orchestrator:
             self._send_telegram_alert(_pick(_SCAN_DONE_MSGS, n=len(total_opps)))
         logger.info("Scan cycle complete")
 
+    def _scan_reddit_all(self) -> int:
+        """Scan Reddit for every project, in parallel. Returns opportunity count found.
+
+        Callable standalone (e.g. from a Reddit-only manual trigger) as well
+        as from the combined _scan_all cycle.
+        """
+        def _scan_one_project(project: dict) -> int:
+            """Scan a single project — runs in a thread pool worker."""
+            proj_name = project.get("project", {}).get("name", "unknown")
+            try:
+                if not self._check_resources():
+                    logger.debug(f"Scan {proj_name}: resources low, skipping")
+                    return 0
+                scan_project = self._expand_project_targets(project)
+                scan_project = self._limit_scan_targets(scan_project)
+                account = self.account_mgr.get_next_account("reddit", project=proj_name)
+                if not account:
+                    logger.debug(f"Scan {proj_name}: no account available")
+                    return 0
+                bot = self._get_reddit_bot(account)
+                opps = bot.scan(scan_project)
+                logger.info(f"Reddit scan for {proj_name}: {len(opps)} opportunities")
+                return len(opps)
+            except Exception as e:
+                logger.error(f"Reddit scan error for {proj_name}: {e}")
+                return 0
+
+        total = 0
+        # Run all project scans in parallel — 4× faster than sequential
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=SCAN_MAX_WORKERS,
+            thread_name_prefix="scan",
+        ) as pool:
+            futures = {pool.submit(_scan_one_project, p): p for p in self.projects}
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    total += fut.result()
+                except Exception as e:
+                    proj = futures[fut].get("project", {}).get("name", "?")
+                    logger.error(f"Scan worker crash for {proj}: {e}")
+        return total
+
     @staticmethod
     def _project_twitter_enabled(project: Dict) -> bool:
         """Whether a project opts into X/Twitter scanning + acting."""
         return bool(project.get("twitter", {}).get("enabled"))
 
-    def _scan_twitter_all(self):
+    def _scan_twitter_all(self) -> int:
         """Scan X/Twitter for every project that has it enabled.
 
         Kept sequential on purpose: twikit clients are bound to an asyncio
         event loop, so concurrent scans across threads cause loop-mismatch
         errors. Each project is isolated in its own try/except so one failure
-        never aborts the others.
+        never aborts the others. Returns opportunity count found.
         """
+        total = 0
         for project in self.projects:
             if not self._project_twitter_enabled(project):
                 continue
             if not self._check_resources():
-                return
+                return total
             proj_name = project.get("project", {}).get("name", "unknown")
             try:
                 account = self.account_mgr.get_next_account("twitter", project=proj_name)
@@ -892,8 +905,10 @@ class Orchestrator:
                 bot = self._get_twitter_bot(account)
                 opps = bot.scan(project)
                 logger.info(f"Twitter scan for {proj_name}: {len(opps)} opportunities")
+                total += len(opps)
             except Exception as e:
                 logger.error(f"Twitter scan error for {proj_name}: {e}")
+        return total
 
     def _limit_scan_targets(self, project: Dict) -> Dict:
         """Limit subreddits and keywords per scan cycle (round-robin rotation).
