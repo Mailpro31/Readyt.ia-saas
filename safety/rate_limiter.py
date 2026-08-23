@@ -4,8 +4,9 @@ import time
 import random
 import logging
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
+import os
 
 from core.database import Database
 
@@ -174,11 +175,14 @@ class RateLimiter:
         self._invalidate_action_cache(account, platform)
 
     def is_active_hours(self) -> bool:
-        """Check if current time is within configured active hours.
+        """Check if current time is within configured active hours (in local timezone).
 
         Handles midnight-spanning ranges, e.g. [22, 4] means 10 PM to 4 AM.
+        Uses local timezone from TZ environment variable or system default.
         """
-        hour = datetime.utcnow().hour
+        # Get current time in local timezone
+        now = datetime.now()
+        hour = now.hour
         start, end = self.active_hours
         if start <= end:
             # Normal range: e.g. [8, 23]
@@ -188,8 +192,9 @@ class RateLimiter:
             return hour >= start or hour < end
 
     def is_weekend(self) -> bool:
-        """Check if today is a weekend."""
-        return datetime.utcnow().weekday() >= 5
+        """Check if today is a weekend (in local timezone)."""
+        # Use local time instead of UTC
+        return datetime.now().weekday() >= 5
 
     def get_weekend_factor(self) -> float:
         """Get activity reduction factor for weekends (0.5 = 50% less)."""
