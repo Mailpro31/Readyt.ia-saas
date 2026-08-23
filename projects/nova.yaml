@@ -151,15 +151,50 @@ reddit:
     - "novaspeak.app"
 
 # =============================================================================
-# Twitter / Telegram (disabled by default for Nova's Reddit-first launch)
+# Twitter / X
 # =============================================================================
+# Set enabled: true to have the orchestrator scan X for these keywords and
+# reply to relevant tweets (needs an X account added via /addtwitter and
+# assigned to this project). X may block datacenter/VPS IPs (code 226) — a
+# residential IP (e.g. home Raspberry Pi) is much more reliable.
 twitter:
+  enabled: true
+  # scan_pages: result pages paged through per term. scan_terms_per_cycle:
+  # how many terms to scan each cycle (round-robin across cycles so one scan
+  # always finishes fast; full keyword coverage is reached over time).
+  scan_pages: 2
+  scan_terms_per_cycle: 8
   keywords:
+    # High-volume intent terms (broad reach — relevance is handled by scoring,
+    # so off-topic tweets score low and won't be replied to)
     - "voice typing"
+    - "voice to text"
+    - "speech to text"
     - "dictation software"
+    - "dictation app"
+    - "voice dictation"
+    - "type by voice"
+    - "talk to type"
+    - "transcribe my voice"
+    - "dragon naturallyspeaking"
+    - "dragon dictation"
+    - "wispr flow"
+    - "otter.ai"
+    - "talon voice"
+    # Audience/pain-point terms (accessibility, ADHD, dysgraphia, RSI)
+    - "typing hurts my hands"
+    - "rsi typing"
+    - "dysgraphia"
+    - "writing is hard adhd"
+    - "hate typing"
   hashtags:
     - "#accessibility"
+    - "#a11y"
     - "#ADHD"
+    - "#dysgraphia"
+    - "#dictation"
+    - "#voicetotext"
+    - "#speechtotext"
   tweet_style: "helpful_casual"
 
 telegram:

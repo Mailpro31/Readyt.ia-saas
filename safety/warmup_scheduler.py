@@ -48,13 +48,24 @@ class WarmupScheduler:
         config_path: str = "config/warmup.yaml",
         bot_factory: Optional[Callable[[Dict], object]] = None,
         alert_cb: Optional[Callable[[str], None]] = None,
+        platform: str = "reddit",
+        config_key: str = "warmup",
     ):
         self.db = db
         self.account_mgr = account_mgr
         self.config_path = config_path
         self.bot_factory = bot_factory
         self.alert_cb = alert_cb
+        self.PLATFORM = platform
+        self.config_key = config_key
         self.config = self._load_config()
+        # Reddit graduates on karma; platforms without a karma signal (X)
+        # graduate purely on days of warm-up. Overridable via config.
+        self.require_karma = bool(
+            self.config.get("require_karma", platform == "reddit")
+        )
+        # Human-readable name of the graduation metric, for dashboards.
+        self.metric_name = "karma" if self.require_karma else "followers"
 
     # ── Config ─────────────────────────────────────────────────────
 
@@ -62,11 +73,11 @@ class WarmupScheduler:
         try:
             with open(self.config_path) as f:
                 data = yaml.safe_load(f) or {}
-            cfg = {**_DEFAULT_CONFIG, **(data.get("warmup", {}))}
+            cfg = {**_DEFAULT_CONFIG, **(data.get(self.config_key, {}))}
             return cfg
         except FileNotFoundError:
             logger.warning(
-                "warmup.yaml not found at %s — using defaults", self.config_path
+                "warmup config not found at %s — using defaults", self.config_path
             )
             return dict(_DEFAULT_CONFIG)
 
@@ -100,17 +111,20 @@ class WarmupScheduler:
             if not username:
                 continue
             existing = self.db.get_warmup(username, self.PLATFORM)
-            karma = self.account_mgr.get_cached_karma(username)
-            if existing is None:
-                # Accounts that are already established skip warm-up entirely.
+            if existing is not None:
+                continue
+            # Reddit: an already-established account (enough karma) skips warm-up.
+            # Platforms without a karma signal (X) always warm up from scratch.
+            if self.require_karma:
+                karma = self.account_mgr.get_cached_karma(username)
                 if karma is not None and karma >= self.config.get("min_karma", 25):
                     self.db.upsert_warmup(username, self.PLATFORM)
                     self.db.set_warmup_status(username, self.PLATFORM, "ready")
                     logger.info(
                         "@%s already warm (karma=%s) — marked ready", username, karma
                     )
-                else:
-                    self.register_account(username)
+                    continue
+            self.register_account(username)
 
     # ── Graduation ─────────────────────────────────────────────────
 
@@ -119,22 +133,34 @@ class WarmupScheduler:
         if row.get("status") != "warming":
             return False
         username = row["account_username"]
-        karma = self.account_mgr.get_cached_karma(username)
-        karma_val = karma if karma is not None else row.get("karma_at_day", 0)
-        min_karma = self.config.get("min_karma", 25)
         min_days = self.config.get("target_day_count", 10)
-        if karma_val >= min_karma and row.get("day_number", 0) >= min_days:
+        day = row.get("day_number", 0)
+        day_ok = day >= min_days
+
+        if self.require_karma:
+            karma = self.account_mgr.get_cached_karma(username)
+            metric_val = karma if karma is not None else row.get("karma_at_day", 0)
+            metric_ok = metric_val >= self.config.get("min_karma", 25)
+        else:
+            # No karma signal (X): graduate on days of warm-up alone.
+            metric_val = row.get("karma_at_day", 0)
+            metric_ok = True
+
+        if day_ok and metric_ok:
             self.db.set_warmup_status(username, self.PLATFORM, "ready")
+            plat = "Reddit" if self.PLATFORM == "reddit" else "X"
+            detail = (
+                f"{self.metric_name}={metric_val}, day {day}"
+                if self.require_karma else f"day {day}/{min_days}"
+            )
             logger.info(
-                "🎓 @%s graduated to READY (karma=%s, day=%s)",
-                username, karma_val, row.get("day_number"),
+                "🎓 @%s (%s) graduated to READY (%s)", username, self.PLATFORM, detail
             )
             if self.alert_cb:
                 try:
                     self.alert_cb(
-                        f"🎓 Account @{username} finished warm-up "
-                        f"(karma={karma_val}, day {row.get('day_number')}) — "
-                        f"now actionable for Nova."
+                        f"🎓 {plat} account @{username} finished warm-up "
+                        f"({detail}) — now cleared to promote Nova."
                     )
                 except Exception:
                     pass
@@ -219,35 +245,52 @@ class WarmupScheduler:
             )
             return False
 
-        subs = self.config.get("neutral_subreddits", []) or ["AskReddit"]
-        subreddit = random.choice(subs)
-        is_upvote = random.random() < float(self.config.get("upvote_ratio", 0.7))
-        comment_text = None
-        if not is_upvote:
-            comments = self.config.get("neutral_comments", []) or [
-                "Thanks for sharing."
-            ]
-            comment_text = random.choice(comments)
+        if self.PLATFORM == "reddit":
+            subs = self.config.get("neutral_subreddits", []) or ["AskReddit"]
+            subreddit = random.choice(subs)
+            is_upvote = random.random() < float(self.config.get("upvote_ratio", 0.7))
+            comment_text = None
+            if not is_upvote:
+                comments = self.config.get("neutral_comments", []) or [
+                    "Thanks for sharing."
+                ]
+                comment_text = random.choice(comments)
+            result = bot.neutral_warmup_action(subreddit, comment_text=comment_text)
+            where = f"r/{subreddit}"
+        else:
+            # X: like a niche tweet, occasionally follow the author.
+            kws = self.config.get("neutral_keywords", []) or None
+            follow_prob = float(self.config.get("follow_prob", 0.3))
+            result = bot.neutral_warmup_action(keywords=kws, follow_prob=follow_prob)
+            where = "X"
 
-        result = bot.neutral_warmup_action(subreddit, comment_text=comment_text)
         if not result.get("ok"):
             return False
 
-        # Refresh karma opportunistically for graduation accuracy.
-        karma = self.account_mgr.get_cached_karma(username)
-        try:
-            info = bot.get_account_info()
-            if info and info.get("karma") is not None:
-                karma = int(info["karma"])
-                self.account_mgr.update_karma_cache(username, karma)
-        except Exception:
-            pass
-        karma = karma if karma is not None else 0
+        # Refresh the graduation metric (karma for reddit, followers for X).
+        if self.require_karma:
+            metric = self.account_mgr.get_cached_karma(username)
+            try:
+                info = bot.get_account_info()
+                if info and info.get("karma") is not None:
+                    metric = int(info["karma"])
+                    self.account_mgr.update_karma_cache(username, metric)
+            except Exception:
+                pass
+            metric = metric if metric is not None else 0
+        else:
+            metric = 0
+            try:
+                info = bot.get_account_info()
+                if info and info.get("followers") is not None:
+                    metric = int(info["followers"])
+            except Exception:
+                pass
 
-        self.db.record_warmup_action(username, self.PLATFORM, karma)
+        self.db.record_warmup_action(username, self.PLATFORM, metric)
         logger.info(
-            "Warm-up action for @%s in r/%s (%s), karma=%s",
-            username, subreddit, result.get("action"), karma,
+            "Warm-up action for @%s on %s (%s), %s=%s",
+            username, where, result.get("action"), self.metric_name, metric,
         )
         # A freshly-updated row may now satisfy graduation.
         updated = self.db.get_warmup(username, self.PLATFORM)
@@ -263,17 +306,27 @@ class WarmupScheduler:
         target = int(self.config.get("target_day_count", 10))
         for row in self.db.get_all_warmup(self.PLATFORM):
             username = row["account_username"]
-            karma = self.account_mgr.get_cached_karma(username)
-            karma_val = karma if karma is not None else row.get("karma_at_day", 0)
+            if self.require_karma:
+                karma = self.account_mgr.get_cached_karma(username)
+                metric_val = karma if karma is not None else row.get("karma_at_day", 0)
+                min_metric = self.config.get("min_karma", 25)
+            else:
+                metric_val = row.get("karma_at_day", 0)
+                min_metric = 0
             day = row.get("day_number", 0)
             out.append({
+                "platform": self.PLATFORM,
                 "username": username,
                 "status": row.get("status"),
                 "day_number": day,
                 "target_day_count": row.get("target_day_count", target),
                 "progress_label": f"Jour {min(day, target)}/{target}",
                 "progress_pct": round(min(day, target) / max(target, 1) * 100, 1),
-                "karma": karma_val,
+                "metric_name": self.metric_name,
+                "metric": metric_val,
+                "min_metric": min_metric,
+                # Backward-compat keys (reddit web dashboard).
+                "karma": metric_val,
                 "min_karma": self.config.get("min_karma", 25),
                 "actions_today": row.get("actions_today", 0),
                 "estimated_ready_day": self.estimate_ready_day(row),

@@ -17,6 +17,44 @@ from typing import List, Dict, Optional
 
 import requests
 
+try:
+    # curl_cffi impersonates a real browser's TLS/HTTP2 fingerprint
+    # (JA3/JA4), not just its headers. Plain `requests` uses Python's own
+    # OpenSSL handshake, which has a distinctive fingerprint that Reddit's
+    # edge (Akamai-style bot detection) flags and 403s regardless of valid
+    # cookies/headers/IP -- confirmed live: a real headless browser (same
+    # cookies, same IP) is recognized as logged-in while `requests` isn't.
+    from curl_cffi import requests as _cffi_requests
+    _HAS_CURL_CFFI = True
+except ImportError:  # pragma: no cover - dev machines without the dep
+    _cffi_requests = None
+    _HAS_CURL_CFFI = False
+
+# curl_cffi raises its own exception hierarchy, not requests'. Catch both so
+# timeout handling works whichever backend ended up in use.
+_TIMEOUT_EXCEPTIONS = (requests.Timeout,)
+if _HAS_CURL_CFFI:
+    try:
+        from curl_cffi.requests.exceptions import Timeout as _CffiTimeout
+        _TIMEOUT_EXCEPTIONS = (requests.Timeout, _CffiTimeout)
+    except ImportError:
+        pass
+
+try:
+    # Confirmed live (2026-07-29): curl_cffi's TLS impersonation is NOT
+    # enough on its own -- old.reddit.com's JSON API still 403s it with
+    # valid cookies on a residential IP. A real headless Chromium (same
+    # cookies) IS recognized as logged in, which means the block needs a
+    # signal only real browser JS produces. This wraps Playwright as a
+    # requests.Session-compatible adapter (see platforms/reddit_browser.py)
+    # so it's the preferred backend when available.
+    from playwright.sync_api import sync_playwright as _sync_playwright  # noqa: F401
+    from platforms.reddit_browser import RedditBrowserSession
+    _HAS_PLAYWRIGHT = True
+except ImportError:  # pragma: no cover - dev machines without the dep
+    RedditBrowserSession = None
+    _HAS_PLAYWRIGHT = False
+
 from platforms.base_platform import BasePlatform
 from core.database import Database
 from core.content_gen import ContentGenerator
@@ -94,9 +132,41 @@ class RedditWebBot(BasePlatform):
             "cookies_file", f"data/cookies/reddit_{self._username}.json"
         )
 
-        # Session for authenticated requests (with connection pooling)
-        self.session = requests.Session()
+        # Proxy support: Reddit aggressively blocks many VPS/datacenter IP
+        # ranges. account_config["proxy"] (resolved by the orchestrator from
+        # settings.yaml http.reddit_proxy, or per-account) routes ALL Reddit
+        # traffic for this bot through it. Read before session creation --
+        # the Playwright backend needs it at launch time.
+        proxy_url = account_config.get("proxy")
+
+        # Session for authenticated requests. Backend preference:
+        #   1. Playwright (real Chromium) -- the ONLY backend confirmed to
+        #      get past Reddit's old.reddit.com bot detection; needs a real
+        #      JS-executing browser signal, not just a TLS fingerprint.
+        #   2. curl_cffi (TLS-fingerprint impersonation) -- better than
+        #      plain requests but confirmed NOT sufficient on its own.
+        #   3. plain requests -- last resort, most likely to 403.
         _ua = _random_ua()
+        self._backend = "requests"
+        if _HAS_PLAYWRIGHT:
+            self._backend = "playwright"
+            self.session = RedditBrowserSession(user_agent=_ua, proxy_url=proxy_url)
+        elif _HAS_CURL_CFFI:
+            self._backend = "curl_cffi"
+            self.session = _cffi_requests.Session(impersonate="chrome131")
+        else:
+            self.session = requests.Session()
+            from requests.adapters import HTTPAdapter
+            _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
+            self.session.mount("https://", _adapter)
+            self.session.mount("http://", _adapter)
+            logger.warning(
+                "Neither Playwright nor curl_cffi available -- falling back "
+                "to plain requests (Reddit may 403 authenticated calls even "
+                "with valid cookies)."
+            )
+        self._using_curl_cffi = self._backend == "curl_cffi"  # kept for compat
+
         self.session.headers.update({
             "User-Agent": _ua,
             "Accept-Language": random.choice(_ACCEPT_LANGUAGES),
@@ -105,10 +175,10 @@ class RedditWebBot(BasePlatform):
             "DNT": "1",
             "Upgrade-Insecure-Requests": "1",
         })
-        from requests.adapters import HTTPAdapter
-        _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
-        self.session.mount("https://", _adapter)
-        self.session.mount("http://", _adapter)
+        if proxy_url:
+            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+            logger.info(f"Reddit bot for {self._username}: using proxy")
+
         self._authenticated = False
         self._modhash = ""
 
@@ -138,9 +208,19 @@ class RedditWebBot(BasePlatform):
         """Load saved session cookies."""
         if os.path.exists(self._cookies_file):
             try:
-                with open(self._cookies_file) as f:
+                # utf-8-sig tolerates a leading BOM (e.g. from PowerShell's
+                # `Out-File -Encoding utf8`, which writes one by default) --
+                # plain 'utf-8' raises JSONDecodeError on it and this used
+                # to fail *silently* here, leaving the bot unauthenticated
+                # with no obvious error.
+                with open(self._cookies_file, encoding="utf-8-sig") as f:
                     cookies = json.load(f)
-                self.session.cookies.update(cookies)
+                try:
+                    self.session.cookies.update(cookies)
+                except AttributeError:
+                    # curl_cffi's cookie jar doesn't support .update()
+                    for k, v in cookies.items():
+                        self.session.cookies.set(k, v)
                 self._authenticated = True
                 logger.debug(f"Loaded Reddit cookies from {self._cookies_file}")
             except Exception as e:
@@ -150,7 +230,12 @@ class RedditWebBot(BasePlatform):
         """Save session cookies to file (atomic write to prevent corruption)."""
         cookie_dir = os.path.dirname(self._cookies_file)
         os.makedirs(cookie_dir, exist_ok=True)
-        cookies = dict(self.session.cookies)
+        try:
+            cookies = dict(self.session.cookies)
+        except (TypeError, ValueError):
+            # curl_cffi's cookie jar isn't directly dict()-able in all
+            # versions -- fall back to iterating items().
+            cookies = {k: v for k, v in self.session.cookies.items()}
         try:
             fd, tmp_path = tempfile.mkstemp(dir=cookie_dir, suffix=".tmp")
             with os.fdopen(fd, "w") as f:
@@ -500,7 +585,7 @@ class RedditWebBot(BasePlatform):
 
                 logger.warning(f"Reddit search returned {resp.status_code}")
 
-            except requests.Timeout:
+            except _TIMEOUT_EXCEPTIONS:
                 logger.debug(f"Search timeout for r/{subreddit}, attempt {attempt+1}")
                 time.sleep(2 ** attempt)
             except (json.JSONDecodeError, ValueError) as e:
@@ -1380,6 +1465,91 @@ class RedditWebBot(BasePlatform):
         except Exception as e:
             logger.error(f"Upvote error: {e}")
             return False
+
+    def neutral_warmup_action(
+        self,
+        subreddit: str,
+        comment_text: Optional[str] = None,
+    ) -> Dict:
+        """Perform ONE neutral warm-up action in a product-unrelated subreddit.
+
+        If ``comment_text`` is given, posts it as a reply on a hot post;
+        otherwise upvotes a hot post. Never mentions any product and never
+        includes links — its only purpose is to accrue karma / account age.
+        Mirrors platforms/reddit_bot.py's method for the cookie-auth path.
+
+        Returns ``{"ok": bool, "action": str, "target_id": str, "error": str}``.
+        """
+        action = "comment" if comment_text else "upvote"
+        if not self._ensure_auth():
+            return {"ok": False, "action": action, "target_id": "",
+                    "error": "auth failed"}
+        try:
+            candidates = self._browse_subreddit(subreddit, sort="hot", limit=15)
+            posts = [
+                p for p in candidates
+                if not p.get("stickied") and not p.get("locked")
+                and not p.get("over_18")
+            ] or candidates
+            if not posts:
+                return {"ok": False, "action": action, "target_id": "",
+                        "error": "no posts found"}
+            post = random.choice(posts[:10])
+            post_id = post.get("id", "")
+            fullname = post.get("name") or f"t3_{post_id}"
+
+            if comment_text:
+                if not self._modhash:
+                    return {"ok": False, "action": action, "target_id": post_id,
+                            "error": "no modhash (CSRF token)"}
+                resp = self.session.post(
+                    f"{REDDIT_OLD}/api/comment",
+                    data={
+                        "thing_id": fullname,
+                        "text": comment_text,
+                        "uh": self._modhash,
+                        "api_type": "json",
+                    },
+                    headers={
+                        "User-Agent": self.session.headers.get("User-Agent", _random_ua()),
+                        "Referer": f"{REDDIT_OLD}/r/{subreddit}/",
+                        "Origin": REDDIT_OLD,
+                    },
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    return {"ok": False, "action": action, "target_id": post_id,
+                            "error": f"http {resp.status_code}"}
+                try:
+                    errors = resp.json().get("json", {}).get("errors", [])
+                except Exception:
+                    errors = []
+                if errors:
+                    return {"ok": False, "action": action, "target_id": post_id,
+                            "error": str(errors)}
+                ok = True
+            else:
+                ok = self.upvote(fullname)
+
+            if ok:
+                self.db.log_action(
+                    platform="reddit",
+                    action_type=f"warmup_{action}",
+                    account=self._username,
+                    project="_warmup",
+                    target_id=post_id,
+                    content=comment_text or "",
+                    metadata={"subreddit": subreddit},
+                )
+                return {"ok": True, "action": action, "target_id": post_id, "error": ""}
+            return {"ok": False, "action": action, "target_id": post_id,
+                    "error": "post failed"}
+        except Exception as e:
+            logger.warning(
+                "Warm-up %s failed in r/%s for %s: %s",
+                action, subreddit, self._username, e,
+            )
+            return {"ok": False, "action": action, "target_id": "", "error": str(e)}
 
     def subscribe(self, subreddit: str) -> bool:
         """Subscribe to a subreddit."""

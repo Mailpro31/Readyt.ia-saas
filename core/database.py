@@ -1111,11 +1111,37 @@ class Database:
         ).fetchall()
         stats["opportunities"] = {row["status"]: row["count"] for row in rows}
 
+        # Same breakdown, but per platform -- lets callers show "Reddit: 3
+        # pending, X: 12 pending" instead of one combined number.
+        rows = self.conn.execute(
+            """SELECT platform, status, COUNT(*) as count
+               FROM opportunities WHERE timestamp > ?
+               GROUP BY platform, status""",
+            (since,),
+        ).fetchall()
+        opps_by_platform: Dict[str, Dict[str, int]] = {}
+        for row in rows:
+            p = row["platform"]
+            opps_by_platform.setdefault(p, {})[row["status"]] = row["count"]
+        stats["opportunities_by_platform"] = opps_by_platform
+
         row = self.conn.execute(
             "SELECT AVG(score) as avg_score FROM opportunities WHERE timestamp > ?",
             (since,),
         ).fetchone()
         stats["avg_opportunity_score"] = round(row["avg_score"] or 0, 1)
+
+        # Per-platform avg score too -- useful to spot one platform's
+        # scanner finding weaker matches than the other.
+        rows = self.conn.execute(
+            """SELECT platform, AVG(score) as avg_score
+               FROM opportunities WHERE timestamp > ?
+               GROUP BY platform""",
+            (since,),
+        ).fetchall()
+        stats["avg_opportunity_score_by_platform"] = {
+            row["platform"]: round(row["avg_score"] or 0, 1) for row in rows
+        }
         return stats
 
     # ── Utilities ────────────────────────────────────────────────────

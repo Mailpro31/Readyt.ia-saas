@@ -4,7 +4,11 @@ services:
     container_name: miloagent
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${MILO_PORT:-8420}:8420"
+      # Bind address is configurable so you don't have to hand-edit this file.
+      # Default 127.0.0.1 = dashboard reachable only from the host (safest).
+      # Set MILO_BIND=0.0.0.0 in .env when access is fronted by Tailscale or a
+      # reverse proxy (e.g. Raspberry Pi at home reached over a Tailnet).
+      - "${MILO_BIND:-127.0.0.1}:${MILO_PORT:-8420}:8420"
     volumes:
       - ./data:/app/data
       - ./config:/app/config
@@ -16,7 +20,11 @@ services:
       - MILO_WEB_PASS=${MILO_WEB_PASS}
       - MILO_WEB_TOKEN=${MILO_WEB_TOKEN:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      # GEO tracking (Nova 1.2) API keys — optional, only if config/geo.yaml is enabled
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - TZ=${TZ:-UTC}
     deploy:
       resources:

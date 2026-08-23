@@ -82,3 +82,7 @@ backups/
 # ── Test artifacts ────────────────────────────────────────
 .pytest_cache/
 test_*.db*
+
+# Monitoring runtime state
+data/.monitor_state
+logs/monitor.log

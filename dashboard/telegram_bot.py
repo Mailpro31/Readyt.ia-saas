@@ -2,13 +2,14 @@
 
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime
 from typing import Dict, List, Optional
 
 import requests as http_requests
 import yaml
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,6 +17,7 @@ from telegram.ext import (
 )
 
 from core.database import Database
+from dashboard import telegram_i18n as i18n
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,8 @@ class TelegramDashboard:
     Human-like notifications + full remote control.
     """
 
+    _LANG_FILE = "data/.telegram_lang"
+
     def __init__(self, config: Dict, db: Database):
         self.config = config
         self.db = db
@@ -125,6 +129,31 @@ class TelegramDashboard:
         self.paused = False
         self._account_manager = None
         self._orchestrator = None
+        self._lang = self._load_lang()
+
+    def _load_lang(self) -> str:
+        """Load the saved UI language, falling back to config then default."""
+        try:
+            with open(self._LANG_FILE) as f:
+                lang = f.read().strip()
+            if lang in i18n.SUPPORTED:
+                return lang
+        except Exception:
+            pass
+        cfg_lang = str(self.config.get("language", i18n.DEFAULT_LANG)).lower()
+        return cfg_lang if cfg_lang in i18n.SUPPORTED else i18n.DEFAULT_LANG
+
+    def _save_lang(self, lang: str) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._LANG_FILE), exist_ok=True)
+            with open(self._LANG_FILE, "w") as f:
+                f.write(lang)
+        except Exception as e:
+            logger.debug("Could not persist language: %s", e)
+
+    def t(self, key: str, **kwargs) -> str:
+        """Translate a UI label in the current language."""
+        return i18n.t(self._lang, key, **kwargs)
 
     def set_account_manager(self, account_manager):
         self._account_manager = account_manager
@@ -162,92 +191,147 @@ class TelegramDashboard:
         self.app.add_handler(CommandHandler("accounts", self._cmd_accounts))
         self.app.add_handler(CommandHandler("addreddit", self._cmd_add_reddit))
         self.app.add_handler(CommandHandler("addtwitter", self._cmd_add_twitter))
+        self.app.add_handler(CommandHandler("pastecookies", self._cmd_paste_cookies))
+        self.app.add_handler(CommandHandler("cookies", self._cmd_cookies))
+        self.app.add_handler(CommandHandler("testtwitter", self._cmd_test_twitter))
+        self.app.add_handler(CommandHandler("warmup", self._cmd_warmup))
+        self.app.add_handler(CommandHandler("skipwarmup", self._cmd_skip_warmup))
         self.app.add_handler(CommandHandler("removeaccount", self._cmd_remove_account))
         self.app.add_handler(CommandHandler("llm", self._cmd_llm))
         self.app.add_handler(CommandHandler("hubs", self._cmd_hubs))
         self.app.add_handler(CommandHandler("performance", self._cmd_performance))
         self.app.add_handler(CommandHandler("debug", self._cmd_debug))
+        self.app.add_handler(CommandHandler("lang", self._cmd_lang))
+        # Global safety net: any command that raises replies with a precise
+        # error instead of failing silently.
+        self.app.add_error_handler(self._on_error)
+        # The native "/" command menu is registered in _async_polling() after
+        # the app initializes (see _post_init).
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reply with a precise error whenever a command handler raises."""
+        err = context.error
+        cmd = ""
+        try:
+            if isinstance(update, Update) and update.message and update.message.text:
+                cmd = update.message.text.split()[0]
+        except Exception:
+            pass
+        logger.error("Command %s failed: %s", cmd or "?", err, exc_info=err)
+        detail = f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
+        try:
+            if isinstance(update, Update) and update.effective_chat:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=self.t("cmd_error", cmd=cmd or "?", detail=detail[:600]),
+                )
+        except Exception:
+            pass
+
+    async def _post_init(self, app) -> None:
+        """Register the native command menu (descriptions shown when typing '/')."""
+        try:
+            for lang in i18n.SUPPORTED:
+                cmds = [
+                    BotCommand(name, desc[:256])
+                    for name, desc in i18n.native_commands(lang)
+                ]
+                await app.bot.set_my_commands(cmds, language_code=lang)
+            # Also set a language-neutral default so every client sees a menu.
+            await app.bot.set_my_commands(
+                [BotCommand(n, d[:256]) for n, d in i18n.native_commands(self._lang)]
+            )
+            logger.info("Telegram native command menu registered (fr+en)")
+        except Exception as e:
+            logger.warning("Could not set Telegram command menu: %s", e)
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
+
+    @staticmethod
+    def _is_placeholder_account(username: str) -> bool:
+        """True for the template/example accounts shipped in the config files."""
+        u = (username or "").lower().strip()
+        if not u:
+            return True
+        return (
+            u.startswith("your_")
+            or u.startswith("yourusername")
+            or u in ("your_reddit_username", "your_twitter_username")
+            or u.startswith("+123456")
+        )
+
+    async def _cmd_lang(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Switch the bot's UI language. Usage: /lang fr | /lang en"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(self.t("lang_usage"))
+            return
+        lang = args[0].lower()
+        if lang not in i18n.SUPPORTED:
+            await update.message.reply_text(self.t("lang_unknown"))
+            return
+        self._lang = lang
+        self._save_lang(lang)
+        await update.message.reply_text(i18n.t(lang, "lang_set"))
+        # Refresh the native menu for the new default language.
+        if self.app:
+            try:
+                await self.app.bot.set_my_commands(
+                    [BotCommand(n, d[:256]) for n, d in i18n.native_commands(lang)]
+                )
+            except Exception:
+                pass
 
     # ── Command Handlers ─────────────────────────────────────────────
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             return
-        text = (
-            "Hey! Here's what I can do:\n\n"
-            "-- Check on me --\n"
-            "/status — How am I doing right now\n"
-            "/stats — What I've done in the last 24h\n"
-            "/report — Full daily breakdown\n"
-            "/last N — My last N actions (full text)\n"
-            "/messages N — All messages posted in last N hours\n"
-            "/health — Are my accounts OK\n"
-            "/insights — What I've learned so far\n"
-            "/projects — Which projects I'm working on\n\n"
-            "-- Intelligence --\n"
-            "/intel — Subreddit opportunity analysis\n"
-            "/presence — Community presence & trust stages\n"
-            "/research — What's trending right now\n"
-            "/friends — Relationship stats\n"
-            "/conversations — Recent DM conversations\n"
-            "/hubs — Owned subreddit hubs status\n"
-            "/performance — Performance score & improvements\n"
-            "/llm — Dual-LLM stats (Groq + Ollama)\n\n"
-            "-- Accounts --\n"
-            "/accounts — List all accounts\n"
-            "/addreddit user pass — Add Reddit account\n"
-            "/addtwitter user email pass — Add X account\n"
-            "/removeaccount platform user — Disable account\n\n"
-            "-- Debugging --\n"
-            "/debug — Why am I not acting? Show recent skipped decisions\n\n"
-            "-- Tell me what to do --\n"
-            "/scan — Go scan for opportunities now\n"
-            "/post — Post something right now\n"
-            "/learn — Analyze my performance and adapt\n"
-            "/pause — Take a break\n"
-            "/resume — Get back to work"
-        )
-        # Send logo with help text
-        from pathlib import Path
-        logo = Path(__file__).parent.parent / "assets" / "miloagent.png"
-        if logo.exists():
-            try:
-                await update.message.reply_photo(
-                    photo=open(logo, "rb"),
-                    caption=text,
-                )
-                return
-            except Exception:
-                pass
+        # Grouped, bilingual command list (see dashboard/telegram_i18n.py).
+        text = i18n.build_help(self._lang)
         await update.message.reply_text(text)
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             return
 
-        paused_str = "Taking a break" if self.paused else "Working"
+        state = self.t("status_paused") if self.paused else self.t("status_working")
         stats = self.db.get_stats_summary(hours=24)
         total_actions = sum(
             sum(t.values()) for t in stats.get("actions", {}).values()
         )
         avg_score = stats.get("avg_opportunity_score", 0)
+        pending = stats.get("opportunities", {}).get("pending", 0)
 
-        text = f"I'm currently: {paused_str}\n"
-        text += f"Actions today: {total_actions}\n"
-
+        text = f"{self.t('status_header')}\n──────────────\n"
+        text += f"{self.t('status_state')}: {state}\n"
+        text += f"{self.t('status_actions')}: {total_actions}\n"
+        text += f"{self.t('status_pending')}: {pending}\n"
         if avg_score:
-            text += f"Avg opportunity quality: {avg_score}/10\n"
+            text += f"{self.t('status_quality')}: {avg_score}/10\n"
 
-        for platform, types in stats.get("actions", {}).items():
-            counts = ", ".join(f"{v} {k}s" for k, v in types.items())
-            emoji = "Reddit" if platform == "reddit" else "Twitter"
-            text += f"\n{emoji}: {counts}"
-
-        if not stats.get("actions"):
-            text += "\nNothing done yet today. Still warming up."
+        actions = stats.get("actions", {})
+        opps_by_platform = stats.get("opportunities_by_platform", {})
+        avg_by_platform = stats.get("avg_opportunity_score_by_platform", {})
+        platforms = sorted(set(actions.keys()) | set(opps_by_platform.keys()))
+        if platforms:
+            text += f"\n{self.t('status_by_plat')}:\n"
+            for platform in platforms:
+                name = "🟠 Reddit" if platform == "reddit" else "🐦 X"
+                types = actions.get(platform, {})
+                counts = ", ".join(f"{v} {k}(s)" for k, v in types.items()) or "0"
+                plat_pending = opps_by_platform.get(platform, {}).get("pending", 0)
+                plat_avg = avg_by_platform.get(platform, 0)
+                line = f"  {name}: {counts}"
+                line += f" | {plat_pending} {self.t('status_pending').lower()}"
+                if plat_avg:
+                    line += f" | {plat_avg}/10"
+                text += line + "\n"
+        else:
+            text += f"\n{self.t('status_nothing')}\n"
 
         await update.message.reply_text(text)
 
@@ -257,7 +341,9 @@ class TelegramDashboard:
 
         stats = self.db.get_stats_summary(hours=24)
 
-        text = "Here's my last 24 hours:\n\n"
+        text = ("📈 24 DERNIÈRES HEURES\n──────────────\n\n"
+                if self._lang == "fr" else
+                "📈 LAST 24 HOURS\n──────────────\n\n")
 
         actions = stats.get("actions", {})
         if actions:
@@ -273,6 +359,17 @@ class TelegramDashboard:
             total = sum(opps.values())
             pending = opps.get("pending", 0)
             text += f"\nOpportunities: {total} total, {pending} still pending"
+
+        opps_by_platform = stats.get("opportunities_by_platform", {})
+        if opps_by_platform:
+            label = "\nPar plateforme" if self._lang == "fr" else "\nBy platform"
+            text += f"{label}:\n"
+            for platform in sorted(opps_by_platform.keys()):
+                name = "Reddit" if platform == "reddit" else "Twitter"
+                per = opps_by_platform[platform]
+                p_total = sum(per.values())
+                p_pending = per.get("pending", 0)
+                text += f"  {name}: {p_total} total, {p_pending} pending\n"
 
         text += "\n\nCost: $0.00 (running free)"
 
@@ -317,7 +414,9 @@ class TelegramDashboard:
             engine = LearningEngine(self.db)
             insights = engine.get_insights()
 
-            text = "Here's what I've figured out so far:\n\n"
+            text = ("💡 CE QUE J'AI APPRIS\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "💡 WHAT I'VE LEARNED\n──────────────\n\n")
 
             top_subs = insights.get("top_subreddits", [])
             if top_subs:
@@ -404,26 +503,29 @@ class TelegramDashboard:
         if not self._is_admin(update.effective_user.id):
             return
 
-        text = "Account status:\n\n"
+        text = f"{self.t('health_header')}\n──────────────\n"
 
         if self._account_manager:
             health = self._account_manager.get_all_health()
+            if not health:
+                text += self.t("health_none") + "\n"
+            status_map = {
+                "healthy": ("✅", "health_good"),
+                "cooldown": ("🕒", "health_cooldown"),
+                "warned": ("⚠️", "health_flagged"),
+                "banned": ("⛔", "health_banned"),
+            }
             for acc in health:
-                status_word = {
-                    "healthy": "Good",
-                    "cooldown": "Cooling down",
-                    "warned": "Flagged",
-                    "banned": "BANNED",
-                }.get(acc["status"], "Unknown")
-                platform = "Reddit" if acc["platform"] == "reddit" else "Twitter"
+                icon, word_key = status_map.get(acc["status"], ("❔", "health_unknown"))
+                platform = "🟠 Reddit" if acc["platform"] == "reddit" else "🐦 X"
                 text += (
-                    f"{platform} @{acc['username']}: {status_word} "
-                    f"({acc['actions_24h']} actions today)\n"
+                    f"{icon} {platform} @{acc['username']}: {self.t(word_key)} "
+                    f"— {acc['actions_24h']} {self.t('health_actions')}\n"
                 )
                 if acc.get("cooldown_until"):
-                    text += f"  Back online: {acc['cooldown_until'][:16]}\n"
+                    text += f"    ↳ {self.t('health_back')}: {acc['cooldown_until'][:16]}\n"
         else:
-            text += "Can't check right now."
+            text += self.t("not_connected")
 
         await update.message.reply_text(text)
 
@@ -555,34 +657,34 @@ class TelegramDashboard:
         if not self._is_admin(update.effective_user.id):
             return
         if not self._orchestrator:
-            await update.message.reply_text("I'm not connected to the main engine right now.")
+            await update.message.reply_text(self.t("not_connected"))
             return
 
-        await update.message.reply_text("On it — scanning all platforms now. I'll let you know what I find.")
+        await update.message.reply_text(self.t("scan_msg"))
         try:
             import threading
             t = threading.Thread(target=self._orchestrator._scan_all_safe, daemon=True)
             t.start()
         except Exception as e:
-            await update.message.reply_text(f"Something went wrong: {e}")
+            await update.message.reply_text(f"{self.t('scan_error')} {e}")
 
     async def _cmd_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
             return
         if not self._orchestrator:
-            await update.message.reply_text("Not connected to the engine.")
+            await update.message.reply_text(self.t("not_connected"))
             return
         if self.paused:
-            await update.message.reply_text("I'm paused right now. /resume me first.")
+            await update.message.reply_text(self.t("post_paused"))
             return
 
-        await update.message.reply_text("Looking for the best opportunity to act on...")
+        await update.message.reply_text(self.t("post_msg"))
         try:
             import threading
             t = threading.Thread(target=self._orchestrator._act_on_best_safe, daemon=True)
             t.start()
         except Exception as e:
-            await update.message.reply_text(f"Couldn't do it: {e}")
+            await update.message.reply_text(f"{self.t('post_error')} {e}")
 
     async def _cmd_projects(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update.effective_user.id):
@@ -640,7 +742,9 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Subreddit Intelligence\n\n"
+            text = ("🧠 INTELLIGENCE SUBREDDITS\n──────────────\n"
+                    if self._lang == "fr" else
+                    "🧠 SUBREDDIT INTELLIGENCE\n──────────────\n")
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
@@ -648,7 +752,7 @@ class TelegramDashboard:
                         proj_name, limit=10
                     )
                     if top:
-                        text += f"--- {proj_name} ---\n"
+                        text += f"📁 {proj_name}\n"
                         for i, s in enumerate(top, 1):
                             score = s.get("opportunity_score", 0)
                             subs = s.get("subscribers", 0)
@@ -659,9 +763,9 @@ class TelegramDashboard:
                             )
                         text += "\n"
                     else:
-                        text += f"--- {proj_name} ---\nNo intel yet. Run /scan first.\n\n"
+                        text += f"📁 {proj_name}\nNo intel yet. Run /scan first.\n\n"
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load intel: {e}"
 
@@ -672,13 +776,15 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Community Presence\n\n"
+            text = ("🏘 PRÉSENCE COMMUNAUTÉ\n──────────────\n"
+                    if self._lang == "fr" else
+                    "🏘 COMMUNITY PRESENCE\n──────────────\n")
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
                     presences = self.db.get_community_presence(proj_name)
                     if presences:
-                        text += f"--- {proj_name} ---\n"
+                        text += f"📁 {proj_name}\n"
                         for p in presences[:15]:
                             stage = p.get("stage", "new")
                             warmth = p.get("warmth_score", 0)
@@ -696,9 +802,9 @@ class TelegramDashboard:
                             )
                         text += "\n"
                     else:
-                        text += f"--- {proj_name} ---\nNo presence data yet.\n\n"
+                        text += f"📁 {proj_name}\nNo presence data yet.\n\n"
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load presence: {e}"
 
@@ -709,21 +815,25 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Research & Trends\n\n"
+            fr = self._lang == "fr"
+            text = ("🔎 RECHERCHE & TENDANCES\n──────────────\n" if fr
+                    else "🔎 RESEARCH & TRENDS\n──────────────\n")
+            _cat_icon = {"talking_point": "💬", "news": "📰", "insight": "💡"}
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
+                    text += f"\n📁 {proj_name}\n"
 
-                    # Knowledge base entries
                     knowledge = self.db.get_knowledge(proj_name, limit=10)
-                    if knowledge:
-                        text += f"--- {proj_name} ---\n"
-                        for k in knowledge:
-                            cat = k.get("category", "?")
-                            topic = k.get("topic", "")
-                            used = k.get("used_count", 0)
-                            text += f"  [{cat}] {topic} (used {used}x)\n"
-                        text += "\n"
+                    for k in knowledge:
+                        cat = k.get("category", "")
+                        topic = (k.get("topic", "") or "").strip()
+                        if len(topic) > 90:
+                            topic = topic[:88] + "…"
+                        used = k.get("used_count", 0)
+                        icon = _cat_icon.get(cat, "•")
+                        tail = f" · {used}×" if used else ""
+                        text += f"  {icon} {topic}{tail}\n"
 
                     # Subreddit trends
                     subs = proj.get("reddit", {}).get("target_subreddits", {})
@@ -733,20 +843,16 @@ class TelegramDashboard:
                         all_subs = subs[:3]
                     else:
                         all_subs = []
-
                     for sub in all_subs:
                         trends = self.db.get_subreddit_trends(sub, proj_name)
-                        if trends:
-                            t = trends[0]
-                            themes = t.get("top_themes", "")
-                            if themes:
-                                text += f"  r/{sub} trending: {themes[:100]}\n"
+                        if trends and trends[0].get("top_themes"):
+                            text += f"  📈 r/{sub}: {trends[0]['top_themes'][:90]}\n"
 
                     if not knowledge and not all_subs:
-                        text += f"--- {proj_name} ---\nNo research data yet.\n"
-                    text += "\n"
+                        text += ("  (pas encore de données de recherche)\n" if fr
+                                 else "  (no research data yet)\n")
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load research: {e}"
 
@@ -760,20 +866,22 @@ class TelegramDashboard:
             return
 
         try:
-            text = "Relationships\n\n"
+            text = ("🤝 RELATIONS\n──────────────\n"
+                    if self._lang == "fr" else
+                    "🤝 RELATIONSHIPS\n──────────────\n")
             if self._orchestrator:
                 for proj in self._orchestrator.projects:
                     proj_name = proj.get("project", {}).get("name", "unknown")
                     stats = self.db.get_relationship_stats(proj_name)
                     if stats:
-                        text += f"--- {proj_name} ---\n"
+                        text += f"📁 {proj_name}\n"
                         for stage in ["noticed", "engaged", "warm", "friend", "advocate"]:
                             count = stats.get(stage, 0)
                             if count > 0:
                                 text += f"  {stage.capitalize()}: {count}\n"
                         text += "\n"
                     else:
-                        text += f"--- {proj_name} ---\nNo relationships yet.\n\n"
+                        text += f"📁 {proj_name}\nNo relationships yet.\n\n"
 
                 # DMs sent today
                 for platform in ("reddit", "twitter"):
@@ -784,7 +892,7 @@ class TelegramDashboard:
                             plat = "Reddit" if platform == "reddit" else "X"
                             text += f"{plat} @{acc['username']}: {count} DMs today\n"
             else:
-                text += "Not connected to the engine."
+                text += self.t("not_connected")
         except Exception as e:
             text = f"Couldn't load relationships: {e}"
 
@@ -801,7 +909,9 @@ class TelegramDashboard:
                 await update.message.reply_text("No conversations yet.")
                 return
 
-            text = "Recent conversations:\n\n"
+            text = ("💬 CONVERSATIONS RÉCENTES\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "💬 RECENT CONVERSATIONS\n──────────────\n\n")
             for conv in recent:
                 plat = "Reddit" if conv["platform"] == "reddit" else "X"
                 direction = "->" if conv["direction"] == "sent" else "<-"
@@ -826,7 +936,7 @@ class TelegramDashboard:
 
         try:
             if not self._orchestrator:
-                await update.message.reply_text("Not connected to the engine.")
+                await update.message.reply_text(self.t("not_connected"))
                 return
 
             hubs = self._orchestrator.hub_manager.get_hubs()
@@ -930,7 +1040,9 @@ class TelegramDashboard:
                 )
                 return
 
-            text = "Recent Decisions (last 2h):\n\n"
+            text = ("🛠 DÉCISIONS RÉCENTES (2h)\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "🛠 RECENT DECISIONS (last 2h)\n──────────────\n\n")
             for d in decisions:
                 ts = d.get("timestamp", "")[-8:]  # HH:MM:SS
                 dtype = d.get("decision_type", "?")
@@ -976,7 +1088,7 @@ class TelegramDashboard:
 
         try:
             if not self._orchestrator:
-                await update.message.reply_text("Not connected to the engine.")
+                await update.message.reply_text(self.t("not_connected"))
                 return
 
             stats = self._orchestrator.llm.get_stats()
@@ -984,7 +1096,9 @@ class TelegramDashboard:
             groq_rate = stats.get("groq_rate", {})
             routing = stats.get("routing", {})
 
-            text = "Dual-LLM System\n\n"
+            text = ("🤖 SYSTÈME IA (Groq + Gemini)\n──────────────\n\n"
+                    if self._lang == "fr" else
+                    "🤖 AI SYSTEM (Groq + Gemini)\n──────────────\n\n")
 
             # Routing info
             creative = routing.get("creative", [])
@@ -1047,25 +1161,31 @@ class TelegramDashboard:
             return
 
         if not self._account_manager:
-            await update.message.reply_text("Account manager not available.")
+            await update.message.reply_text(self.t("no_account_mgr"))
             return
 
         try:
-            accounts = self._account_manager.list_all_accounts()
+            accounts = [
+                a for a in self._account_manager.list_all_accounts()
+                if not self._is_placeholder_account(a.get("username"))
+            ]
             if not accounts:
-                await update.message.reply_text("No accounts configured yet.")
+                await update.message.reply_text(self.t("accounts_none"))
                 return
 
-            text = f"All accounts ({len(accounts)}):\n\n"
+            text = f"{self.t('accounts_header')} ({len(accounts)})\n──────────────\n"
             for acc in accounts:
-                plat = "Reddit" if acc["platform"] == "reddit" else "X"
-                status = "ON" if acc["enabled"] else "OFF"
-                cookies = "cookies OK" if acc["has_cookies"] else "no cookies"
-                projects = ", ".join(acc["projects"]) if acc["projects"] else "none"
+                plat = "🟠 Reddit" if acc["platform"] == "reddit" else "🐦 X"
+                status = "🟢 ON" if acc["enabled"] else "⚪ OFF"
+                cookies = (
+                    f"🍪 {self.t('accounts_cookies_ok')}" if acc["has_cookies"]
+                    else f"❌ {self.t('accounts_no_cookies')}"
+                )
+                projects = ", ".join(acc["projects"]) if acc["projects"] else "—"
                 text += (
-                    f"  {plat} @{acc['username']} [{status}]\n"
-                    f"    Persona: {acc['persona']} | {cookies}\n"
-                    f"    Projects: {projects}\n\n"
+                    f"\n{plat} @{acc['username']}  [{status}]\n"
+                    f"    {cookies} · {self.t('accounts_persona')}: {acc['persona']}\n"
+                    f"    {self.t('accounts_projects')}: {projects}\n"
                 )
 
             await update.message.reply_text(text)
@@ -1080,7 +1200,7 @@ class TelegramDashboard:
         if not self._is_admin(update.effective_user.id):
             return
         if not self._account_manager:
-            await update.message.reply_text("Account manager not available.")
+            await update.message.reply_text(self.t("no_account_mgr"))
             return
 
         args = context.args or []
@@ -1118,7 +1238,7 @@ class TelegramDashboard:
         if not self._is_admin(update.effective_user.id):
             return
         if not self._account_manager:
-            await update.message.reply_text("Account manager not available.")
+            await update.message.reply_text(self.t("no_account_mgr"))
             return
 
         args = context.args or []
@@ -1144,18 +1264,109 @@ class TelegramDashboard:
             )
             await update.message.reply_text(
                 f"{result}\n\n"
-                f"The bot will try to login on next action.\n"
-                f"If 2FA is needed, add totp_secret in the YAML."
+                f"X blocks automated password login, so paste your session "
+                f"cookies instead:\n"
+                f"/pastecookies twitter {username} <paste cookies>\n\n"
+                f"(Export them with a Cookie-Editor extension while logged in "
+                f"to x.com — you need auth_token, ct0, twid.)"
             )
         except Exception as e:
             await update.message.reply_text(f"Failed to add account: {e}")
+
+    async def _cmd_paste_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Paste browser session cookies for an account, from the phone.
+
+        Usage: /pastecookies <platform> <username> <cookies>
+        <cookies> may be a Cookie-Editor JSON export, a "name=value; ..."
+        string, or a Netscape cookie file — all on the same message.
+        """
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._account_manager:
+            await update.message.reply_text(self.t("no_account_mgr"))
+            return
+
+        # Parse from the raw text so the cookie blob (which contains spaces and
+        # newlines) is preserved. split(None, 3) → [cmd, platform, user, blob].
+        text = update.message.text or ""
+        parts = text.split(None, 3)
+        if len(parts) < 4:
+            await update.message.reply_text(
+                "Usage: /pastecookies <platform> <username> <cookies>\n"
+                "Example: /pastecookies twitter myuser [{\"name\":\"auth_token\",...}]\n"
+                "Cookies can be a Cookie-Editor JSON export, a "
+                "'name=value; name2=value2' string, or a Netscape file."
+            )
+            return
+
+        platform = parts[1].lower()
+        if platform == "x":
+            platform = "twitter"
+        username = parts[2]
+        raw = parts[3]
+
+        if platform not in ("reddit", "twitter"):
+            await update.message.reply_text(
+                f"Unknown platform '{platform}'. Use reddit or twitter."
+            )
+            return
+
+        try:
+            from core.cookie_import import (
+                parse_cookie_blob, write_cookie_file, KEY_COOKIES,
+            )
+
+            cookie_dict = parse_cookie_blob(raw)
+            if not cookie_dict:
+                await update.message.reply_text(
+                    "Couldn't parse any cookies. Paste a Cookie-Editor JSON "
+                    "export, a 'name=value; ...' string, or a Netscape file."
+                )
+                return
+
+            # Resolve the target account and its cookie file path.
+            accounts = self._account_manager.load_accounts(platform)
+            target = next(
+                (a for a in accounts if a.get("username", "").lower() == username.lower()),
+                None,
+            )
+            if not target:
+                await update.message.reply_text(
+                    f"Account @{username} not found for {platform}. "
+                    f"Add it first (/add{platform} …)."
+                )
+                return
+
+            cookies_file = target.get(
+                "cookies_file", f"data/cookies/{platform}_{username}.json"
+            )
+            # Security: keep the write inside data/.
+            abs_path = os.path.abspath(cookies_file)
+            if not abs_path.startswith(os.path.abspath("data") + os.sep):
+                await update.message.reply_text("Invalid cookies file path.")
+                return
+
+            write_cookie_file(cookies_file, platform, cookie_dict)
+
+            keys = KEY_COOKIES.get(platform, [])
+            found = [k for k in keys if k in cookie_dict]
+            missing = [k for k in keys if k not in cookie_dict]
+            msg = (
+                f"Saved {len(cookie_dict)} cookies for @{username} ({platform}).\n"
+                f"Key cookies found: {', '.join(found) or 'none'}"
+            )
+            if missing:
+                msg += f"\nMissing (session may not work): {', '.join(missing)}"
+            await update.message.reply_text(msg)
+        except Exception as e:
+            await update.message.reply_text(f"Failed to save cookies: {e}")
 
     async def _cmd_remove_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Disable an account. Usage: /removeaccount reddit username"""
         if not self._is_admin(update.effective_user.id):
             return
         if not self._account_manager:
-            await update.message.reply_text("Account manager not available.")
+            await update.message.reply_text(self.t("no_account_mgr"))
             return
 
         args = context.args or []
@@ -1177,6 +1388,232 @@ class TelegramDashboard:
             await update.message.reply_text(result)
         except Exception as e:
             await update.message.reply_text(f"Failed: {e}")
+
+    async def _cmd_skip_warmup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Skip an account's warm-up so it can promote immediately.
+
+        Usage: /skipwarmup <platform> <username>
+        """
+        if not self._is_admin(update.effective_user.id):
+            return
+        args = context.args or []
+        if len(args) < 2:
+            await update.message.reply_text(self.t("skip_usage"))
+            return
+        platform = args[0].lower()
+        if platform == "x":
+            platform = "twitter"
+        if platform not in ("reddit", "twitter"):
+            await update.message.reply_text(self.t("skip_unknown"))
+            return
+        username = args[1].lstrip("@")
+        # Mark the warm-up row ready (create it first if it doesn't exist).
+        self.db.upsert_warmup(username, platform)
+        self.db.set_warmup_status(username, platform, "ready")
+        await update.message.reply_text(
+            self.t("skip_done", user=username, platform=platform)
+        )
+
+    async def _cmd_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show cookie/session status per account (which key cookies are present)."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._account_manager:
+            await update.message.reply_text(self.t("no_account_mgr"))
+            return
+
+        import json as _json
+        from core.cookie_import import KEY_COOKIES
+
+        accounts = [
+            a for a in self._account_manager.list_all_accounts()
+            if not self._is_placeholder_account(a.get("username"))
+        ]
+        if not accounts:
+            await update.message.reply_text(self.t("cookies_none"))
+            return
+
+        text = f"{self.t('cookies_header')}\n──────────────\n"
+        for acc in accounts:
+            platform = acc["platform"]
+            if platform == "telegram":
+                continue
+            name = "🟠 Reddit" if platform == "reddit" else "🐦 X"
+            cf = acc.get("cookies_file", "")
+            if not cf or not os.path.exists(cf):
+                text += f"\n{name} @{acc['username']}: ❌ {self.t('cookies_no_file')}\n"
+                continue
+            try:
+                with open(cf) as f:
+                    raw = _json.load(f)
+                names = set(raw.keys()) if isinstance(raw, dict) else {
+                    c.get("name") for c in raw if isinstance(c, dict)
+                }
+            except Exception:
+                names = set()
+            keys = KEY_COOKIES.get(platform, [])
+            missing = [k for k in keys if k not in names]
+            if missing:
+                text += (
+                    f"\n{name} @{acc['username']}: ⚠️ {self.t('cookies_missing')} "
+                    f"{', '.join(missing)}\n"
+                    f"    ↳ {self.t('cookies_repaste')} /pastecookies {platform} "
+                    f"{acc['username']} <cookies>\n"
+                )
+            else:
+                text += f"\n{name} @{acc['username']}: ✅ {self.t('cookies_ok')}\n"
+
+        text += f"\n{self.t('cookies_footer')}"
+        await update.message.reply_text(text)
+
+    async def _cmd_test_twitter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Test the X account end-to-end (connect + a real scan) from the phone."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._orchestrator:
+            await update.message.reply_text(self.t("not_connected"))
+            return
+        await update.message.reply_text(self.t("tt_start"))
+        import threading
+        threading.Thread(target=self._run_twitter_test, daemon=True).start()
+
+    def _run_twitter_test(self):
+        """Background worker for /testtwitter. Reports via send_alert_sync."""
+        try:
+            acc = (
+                self._account_manager.get_next_account("twitter")
+                if self._account_manager else None
+            )
+            if not acc:
+                self.send_alert_sync(
+                    "🐦 X test: no X account configured. Add one with /addtwitter."
+                )
+                return
+            bot = self._orchestrator._get_twitter_bot(acc)
+            if not bot.test_connection():
+                self.send_alert_sync(
+                    "🐦 X test: ❌ couldn't connect. Cookies likely expired — "
+                    f"re-paste with /pastecookies twitter {acc['username']} <cookies>"
+                )
+                return
+            project = next(
+                (p for p in self._orchestrator.projects
+                 if p.get("twitter", {}).get("enabled")),
+                None,
+            )
+            if not project:
+                self.send_alert_sync(
+                    "🐦 X test: ✅ connected. (No X-enabled project to scan — "
+                    "set twitter.enabled: true in a project.)"
+                )
+                return
+            opps = bot.scan(project)
+            stats = getattr(bot, "_last_scan_stats", {}) or {}
+
+            if opps:
+                self.send_alert_sync(
+                    f"🐦 X test: ✅ connected + scan OK — found {len(opps)} "
+                    f"opportunities. The bot will reply on its normal cycle."
+                )
+                return
+
+            # 0 opportunities: distinguish "genuinely no matches" from
+            # "every search silently failed" instead of just saying "0 found".
+            tried = stats.get("terms_tried", 0)
+            ok = stats.get("terms_ok", 0)
+            empty = stats.get("terms_empty", 0)
+            errors = stats.get("terms_error", 0)
+            if errors and errors == tried:
+                sample = "\n".join(f"  • {s}" for s in stats.get("sample_errors", []))
+                self.send_alert_sync(
+                    f"🐦 X test: ⚠️ connected, but ALL {tried} search terms "
+                    f"failed (0 succeeded) — that's why 0 opportunities.\n"
+                    f"Sample errors:\n{sample or stats.get('last_error', '?')}"
+                )
+            elif errors:
+                self.send_alert_sync(
+                    f"🐦 X test: ✅ connected + scan ran ({ok} ok, {empty} empty, "
+                    f"{errors} failed out of {tried} terms) — found 0 "
+                    f"opportunities this time. Last error: {stats.get('last_error', '?')}\n"
+                    f"This can be normal (no matching tweets right now); "
+                    f"it'll keep trying on the next cycle."
+                )
+            else:
+                self.send_alert_sync(
+                    f"🐦 X test: ✅ connected + scan OK ({tried} terms searched, "
+                    f"no errors) — genuinely 0 matching tweets right now. "
+                    f"Normal — it'll keep scanning on the normal cycle."
+                )
+        except Exception as e:
+            msg = str(e)
+            detail = f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+            if "KEY_BYTE" in msg or "ClientTransaction" in msg or "ondemand" in msg:
+                self.send_alert_sync(
+                    "🐦 X test: ⚠️ twikit anti-bot token issue (upstream twikit "
+                    f"break — see the patch). Detail: {detail}"
+                )
+            elif "cookie" in msg.lower() or "auth" in msg.lower() or "login" in msg.lower():
+                self.send_alert_sync(
+                    f"🐦 X test: ❌ {detail}\n"
+                    "→ Looks like a session/cookie problem. Re-paste with "
+                    "/pastecookies twitter <user> <cookies>."
+                )
+            else:
+                self.send_alert_sync(f"🐦 X test: ❌ {detail}")
+
+    async def _cmd_warmup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show account warm-up progress per account (Reddit + X)."""
+        if not self._is_admin(update.effective_user.id):
+            return
+        if not self._orchestrator:
+            await update.message.reply_text(self.t("not_connected"))
+            return
+
+        def _bar(pct: float) -> str:
+            filled = max(0, min(10, int(round(pct / 10))))
+            return "▓" * filled + "░" * (10 - filled) + f" {int(pct)}%"
+
+        schedulers = []
+        if hasattr(self._orchestrator, "warmup"):
+            schedulers.append(("🟠 Reddit", self._orchestrator.warmup))
+        if hasattr(self._orchestrator, "warmup_twitter"):
+            schedulers.append(("🐦 X", self._orchestrator.warmup_twitter))
+
+        lines = [f"{self.t('warmup_header')}\n──────────────"]
+        any_rows = False
+        for label, sched in schedulers:
+            try:
+                rows = sched.progress_view()
+            except Exception:
+                rows = []
+            if not rows:
+                continue
+            lines.append(f"\n{label}:")
+            for r in rows:
+                any_rows = True
+                status = r.get("status")
+                icon = {"warming": "🔥", "ready": "✅", "paused": "⏸"}.get(status, "•")
+                if status == "ready":
+                    lines.append(f"  {icon} @{r['username']} — {self.t('warmup_ready')}")
+                    continue
+                day = r.get("day_number", 0)
+                target = r.get("target_day_count", 10)
+                metric_name = r.get("metric_name", "karma")
+                metric = r.get("metric", 0)
+                min_metric = r.get("min_metric", 0)
+                metric_str = (
+                    f"{metric_name}: {metric}/{min_metric}"
+                    if min_metric else f"{metric_name}: {metric}"
+                )
+                lines.append(
+                    f"  {icon} @{r['username']} — {self.t('warmup_day')} {day}/{target}\n"
+                    f"      {_bar(r.get('progress_pct', 0))}\n"
+                    f"      {metric_str} · {r.get('actions_today', 0)} {self.t('warmup_actions')}"
+                )
+        if not any_rows:
+            lines.append(f"\n{self.t('warmup_none')}")
+        lines.append(f"\n{self.t('warmup_footer')}")
+        await update.message.reply_text("\n".join(lines))
 
     # ── Reports ──────────────────────────────────────────────────────
 
@@ -1212,6 +1649,13 @@ class TelegramDashboard:
         avg = stats.get("avg_opportunity_score", 0)
         if avg:
             report += f" (avg quality: {avg}/10)"
+
+        opps_by_platform = stats.get("opportunities_by_platform", {})
+        if opps_by_platform:
+            for platform in sorted(opps_by_platform.keys()):
+                name = "Reddit" if platform == "reddit" else "Twitter"
+                p_pending = opps_by_platform[platform].get("pending", 0)
+                report += f"\n  {name}: {p_pending} pending"
 
         # Health
         if self._account_manager:
@@ -1294,6 +1738,9 @@ class TelegramDashboard:
 
     async def _async_polling(self):
         await self.app.initialize()
+        # Register the native "/" command menu (with per-command descriptions).
+        # Done here because manual initialize()/start() does not fire post_init.
+        await self._post_init(self.app)
         await self.app.start()
         await self.app.updater.start_polling()
         logger.info("Telegram polling active")

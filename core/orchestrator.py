@@ -175,6 +175,17 @@ class Orchestrator:
             bot_factory=self._get_reddit_bot,
             alert_cb=self._send_telegram_alert,
         )
+        # X/Twitter warm-up: progressive neutral engagement (likes/follows) so
+        # a cold account builds a natural footprint before it ever promotes.
+        # Graduates on days of warm-up (no karma signal on X).
+        self.warmup_twitter = WarmupScheduler(
+            self.db, self.account_mgr,
+            config_path=f"{config_dir}/warmup.yaml",
+            bot_factory=self._get_twitter_bot,
+            alert_cb=self._send_telegram_alert,
+            platform="twitter",
+            config_key="warmup_twitter",
+        )
         # Track which slugs / geo queries have already fired a "first" alert.
         self._alerted_click_slugs: set = set()
         self._alerted_geo_keys: set = set()
@@ -316,16 +327,29 @@ class Orchestrator:
         """Get or create a Reddit bot for an account."""
         username = account["username"]
         if username not in self._reddit_bots:
+            # Resolve proxy: per-account > reddit-specific > global (same
+            # precedence as Twitter). Reddit aggressively blocks many VPS/
+            # datacenter IP ranges, so this is often required in practice.
+            http_cfg = self.settings.get("http", {})
+            proxy = (
+                account.get("proxy")
+                or http_cfg.get("reddit_proxy")
+                or http_cfg.get("proxy")
+            )
+            account_with_proxy = dict(account)
+            if proxy:
+                account_with_proxy["proxy"] = proxy
+
             reddit_cfg = load_yaml(f"{self.config_dir}/reddit_accounts.yaml")
             auth_mode = reddit_cfg.get("auth_mode", "web")
             if auth_mode == "api" and account.get("client_id"):
                 self._reddit_bots[username] = RedditBot(
-                    self.db, self.content_gen, account
+                    self.db, self.content_gen, account_with_proxy
                 )
             else:
                 from platforms.reddit_web import RedditWebBot
                 self._reddit_bots[username] = RedditWebBot(
-                    self.db, self.content_gen, account
+                    self.db, self.content_gen, account_with_proxy
                 )
         return self._reddit_bots[username]
 
@@ -548,6 +572,13 @@ class Orchestrator:
             self._warmup_cycle_safe, "interval",
             minutes=30, id="warmup",
             next_run_time=datetime.utcnow() + timedelta(minutes=4),
+        )
+        # Nova: X/Twitter account warm-up (only runs if a twitter-enabled
+        # project + X account exist; otherwise it's a cheap no-op).
+        self.scheduler.add_job(
+            self._warmup_twitter_cycle_safe, "interval",
+            minutes=45, id="warmup_twitter",
+            next_run_time=datetime.utcnow() + timedelta(minutes=6),
         )
         # Nova: GEO / AEO AI-citation tracking (paid APIs — runs every 48h)
         geo_interval = self.geo_config.get("geo", {}).get("interval_hours", 48)
@@ -790,25 +821,48 @@ class Orchestrator:
 
         logger.info("Starting scan cycle...")
 
-        def _scan_one_project(project: dict) -> None:
+        self._scan_reddit_all()
+
+        # Twitter scan — sequential (twikit is async / event-loop sensitive,
+        # so it must not run inside the parallel Reddit thread pool). Only
+        # projects with twitter.enabled and an available X account are scanned.
+        self._scan_twitter_all()
+
+        # Notify Telegram (one message per cycle)
+        total_opps = self.db.get_pending_opportunities(limit=100)
+        if total_opps:
+            from dashboard.telegram_bot import _SCAN_DONE_MSGS, _pick
+            self._send_telegram_alert(_pick(_SCAN_DONE_MSGS, n=len(total_opps)))
+        logger.info("Scan cycle complete")
+
+    def _scan_reddit_all(self) -> int:
+        """Scan Reddit for every project, in parallel. Returns opportunity count found.
+
+        Callable standalone (e.g. from a Reddit-only manual trigger) as well
+        as from the combined _scan_all cycle.
+        """
+        def _scan_one_project(project: dict) -> int:
             """Scan a single project — runs in a thread pool worker."""
             proj_name = project.get("project", {}).get("name", "unknown")
             try:
                 if not self._check_resources():
                     logger.debug(f"Scan {proj_name}: resources low, skipping")
-                    return
+                    return 0
                 scan_project = self._expand_project_targets(project)
                 scan_project = self._limit_scan_targets(scan_project)
                 account = self.account_mgr.get_next_account("reddit", project=proj_name)
                 if not account:
                     logger.debug(f"Scan {proj_name}: no account available")
-                    return
+                    return 0
                 bot = self._get_reddit_bot(account)
                 opps = bot.scan(scan_project)
                 logger.info(f"Reddit scan for {proj_name}: {len(opps)} opportunities")
+                return len(opps)
             except Exception as e:
                 logger.error(f"Reddit scan error for {proj_name}: {e}")
+                return 0
 
+        total = 0
         # Run all project scans in parallel — 4× faster than sequential
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=SCAN_MAX_WORKERS,
@@ -817,17 +871,44 @@ class Orchestrator:
             futures = {pool.submit(_scan_one_project, p): p for p in self.projects}
             for fut in concurrent.futures.as_completed(futures):
                 try:
-                    fut.result()
+                    total += fut.result()
                 except Exception as e:
                     proj = futures[fut].get("project", {}).get("name", "?")
                     logger.error(f"Scan worker crash for {proj}: {e}")
+        return total
 
-        # Notify Telegram (one message per cycle)
-        total_opps = self.db.get_pending_opportunities(limit=100)
-        if total_opps:
-            from dashboard.telegram_bot import _SCAN_DONE_MSGS, _pick
-            self._send_telegram_alert(_pick(_SCAN_DONE_MSGS, n=len(total_opps)))
-        logger.info("Scan cycle complete")
+    @staticmethod
+    def _project_twitter_enabled(project: Dict) -> bool:
+        """Whether a project opts into X/Twitter scanning + acting."""
+        return bool(project.get("twitter", {}).get("enabled"))
+
+    def _scan_twitter_all(self) -> int:
+        """Scan X/Twitter for every project that has it enabled.
+
+        Kept sequential on purpose: twikit clients are bound to an asyncio
+        event loop, so concurrent scans across threads cause loop-mismatch
+        errors. Each project is isolated in its own try/except so one failure
+        never aborts the others. Returns opportunity count found.
+        """
+        total = 0
+        for project in self.projects:
+            if not self._project_twitter_enabled(project):
+                continue
+            if not self._check_resources():
+                return total
+            proj_name = project.get("project", {}).get("name", "unknown")
+            try:
+                account = self.account_mgr.get_next_account("twitter", project=proj_name)
+                if not account:
+                    logger.debug(f"Twitter scan {proj_name}: no account available")
+                    continue
+                bot = self._get_twitter_bot(account)
+                opps = bot.scan(project)
+                logger.info(f"Twitter scan for {proj_name}: {len(opps)} opportunities")
+                total += len(opps)
+            except Exception as e:
+                logger.error(f"Twitter scan error for {proj_name}: {e}")
+        return total
 
     def _limit_scan_targets(self, project: Dict) -> Dict:
         """Limit subreddits and keywords per scan cycle (round-robin rotation).
@@ -949,8 +1030,13 @@ class Orchestrator:
         """Act on the best opportunity for a single project. Returns True if action taken."""
         proj_name = project.get("project", {}).get("name", "unknown")
 
-        # Rotate starting platform each cycle (thread-safe)
-        platforms = ["reddit", "telegram"]  # Twitter disabled: server IP blocked (code 226)
+        # Rotate starting platform each cycle (thread-safe). Twitter is only
+        # in the rotation when the project opts in (twitter.enabled); otherwise
+        # it's skipped entirely. Historically disabled because X blocks many
+        # VPS IPs (code 226) — fine again on a residential IP.
+        platforms = ["reddit", "telegram"]
+        if self._project_twitter_enabled(project):
+            platforms.append("twitter")
         with self._state_lock:
             start = self._platform_turn % len(platforms)
             self._platform_turn += 1
@@ -2431,6 +2517,26 @@ class Orchestrator:
                 )
         except Exception as e:
             logger.error("Warm-up cycle error: %s", e)
+
+    def _warmup_twitter_cycle_safe(self):
+        """Run one X/Twitter warm-up cycle. Never raises."""
+        if self._paused:
+            return
+        if not self._check_resources():
+            return
+        # Skip entirely unless some project actually enables twitter.
+        if not any(self._project_twitter_enabled(p) for p in self.projects):
+            return
+        try:
+            stats = self.warmup_twitter.run_cycle()
+            if stats.get("executed") or stats.get("graduated"):
+                logger.info(
+                    "Twitter warm-up cycle: %d actions, %d graduated, %d skipped",
+                    stats.get("executed", 0), stats.get("graduated", 0),
+                    stats.get("skipped", 0),
+                )
+        except Exception as e:
+            logger.error("Twitter warm-up cycle error: %s", e)
 
     def _geo_track_safe(self):
         """Run the GEO / AEO citation tracking job (Phase 1.2). Never raises."""
